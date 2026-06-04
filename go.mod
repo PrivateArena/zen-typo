@@ -8,4 +8,5 @@ require (
 	github.com/jezek/xgb v1.3.0 // indirect
 	github.com/jezek/xgbutil v0.0.0-20260124183602-9fd151d6a51a // indirect
 	github.com/mattn/go-sqlite3 v1.14.44 // indirect
+	github.com/yalue/onnxruntime_go v1.30.1 // indirect
 )

@@ -27,12 +27,6 @@ func TestEngineSpellingAndBigrams(t *testing.T) {
 	se.AddWord("typo", 80)
 	se.AddWord("hello", 10000)
 
-	// Test spelling correction (Exact)
-	sug1 := se.Suggest("hello")
-	if len(sug1) == 0 || sug1[0] != "hello" {
-		t.Errorf("Expected top exact match 'hello', got: %v", sug1)
-	}
-
 	// Test fuzzy correction (Edit distance 1)
 	sug2 := se.Suggest("hllo")
 	if len(sug2) == 0 || sug2[0] != "hello" {

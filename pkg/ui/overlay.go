@@ -160,7 +160,7 @@ func Start(onTextChanged func(text string), onCommit func(text string), onHide f
 			}
 			controller.mu.Unlock()
 			if idx >= 0 && idx < len(controller.candidates) {
-				controller.applySuggestionAndPredict(idx)
+				controller.applySuggestion(idx)
 			}
 			return true
 
@@ -173,7 +173,7 @@ func Start(onTextChanged func(text string), onCommit func(text string), onHide f
 				}
 				idx := controller.selectedIndex
 				controller.mu.Unlock()
-				controller.applySuggestionAndPredict(idx)
+				controller.applySuggestion(idx)
 			} else {
 				controller.mu.Unlock()
 			}
@@ -249,7 +249,7 @@ func newCandidateSlot(c *UIController, idx int) (*candidateSlot, error) {
 	// Click handler — capture idx at slot-creation time
 	slotIdx := idx
 	box.Connect("button-press-event", func() bool {
-		c.applySuggestionAndPredict(slotIdx)
+		c.applySuggestion(slotIdx)
 		return true
 	})
 
@@ -363,11 +363,7 @@ func (c *UIController) GetText() string {
 func (c *UIController) UpdateCandidates(candidates []string) {
 	c.mu.Lock()
 	c.candidates = candidates
-	if len(candidates) > 0 {
-		c.selectedIndex = 0
-	} else {
-		c.selectedIndex = -1
-	}
+	c.selectedIndex = -1
 	c.mu.Unlock()
 
 	glib.IdleAdd(func() {
@@ -403,7 +399,9 @@ func (c *UIController) renderCandidates() {
 	}
 }
 
-// applySuggestion inserts the candidate at index (no next-word predict; used by keyboard cycling).
+// applySuggestion applies a candidate via entry.SetText.
+// The "changed" signal on entry fires automatically and calls OnTextChanged,
+// so we do NOT call OnTextChanged explicitly (that would cause a double render).
 func (c *UIController) applySuggestion(index int) {
 	c.mu.Lock()
 	if index < 0 || index >= len(c.candidates) {
@@ -423,35 +421,7 @@ func (c *UIController) applySuggestion(index int) {
 			words[len(words)-1] = candidate
 			newText = strings.Join(words, " ") + " "
 		}
-		c.entry.SetText(newText)
-		c.entry.SetPosition(-1)
-	})
-}
-
-// applySuggestionAndPredict applies a candidate via entry.SetText.
-// The "changed" signal on entry fires automatically and calls OnTextChanged,
-// so we do NOT call OnTextChanged explicitly (that would cause a double render).
-func (c *UIController) applySuggestionAndPredict(index int) {
-	c.mu.Lock()
-	if index < 0 || index >= len(c.candidates) {
-		c.mu.Unlock()
-		return
-	}
-	candidate := c.candidates[index]
-	c.mu.Unlock()
-
-	glib.IdleAdd(func() {
-		text, _ := c.entry.GetText()
-		words := strings.Fields(text)
-		var newText string
-		if strings.HasSuffix(text, " ") || len(words) == 0 {
-			newText = strings.TrimRight(text, " ") + " " + candidate + " "
-		} else {
-			words[len(words)-1] = candidate
-			newText = strings.Join(words, " ") + " "
-		}
 		// SetText fires the "changed" signal → onTextChanged → UpdateCandidates.
-		// Do NOT call OnTextChanged again here — that causes double rendering.
 		c.entry.SetText(newText)
 		c.entry.SetPosition(-1)
 	})

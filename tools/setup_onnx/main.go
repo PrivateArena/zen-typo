@@ -20,6 +20,8 @@
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"flag"
 	"fmt"
 	"io"
@@ -27,6 +29,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -35,8 +38,8 @@ const (
 	vocabURL     = "https://huggingface.co/gpt2/resolve/main/vocab.json"
 	mergesURL    = "https://huggingface.co/gpt2/resolve/main/merges.txt"
 
-	// ONNX Runtime 1.17.3 for Linux x86_64
-	onnxRuntimeURL = "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/onnxruntime-linux-x64-1.17.3.tgz"
+	// ONNX Runtime 1.25.0 for Linux x86_64
+	onnxRuntimeURL = "https://github.com/microsoft/onnxruntime/releases/download/v1.25.0/onnxruntime-linux-x64-1.25.0.tgz"
 )
 
 func main() {
@@ -122,8 +125,9 @@ func download(url, dest string) error {
 }
 
 func checkOnnxRuntime() {
-	// Check if libonnxruntime.so is already on the system
+	// 1. Check if libonnxruntime.so is already in the current directory or local paths
 	paths := []string{
+		"libonnxruntime.so",
 		"/usr/local/lib/libonnxruntime.so",
 		"/usr/lib/libonnxruntime.so",
 		"/usr/lib/x86_64-linux-gnu/libonnxruntime.so",
@@ -135,12 +139,63 @@ func checkOnnxRuntime() {
 		}
 	}
 
-	fmt.Println()
-	fmt.Println("⚠  ONNX Runtime shared library not found. Install it:")
-	fmt.Println()
-	fmt.Printf("  wget %s\n", onnxRuntimeURL)
-	fmt.Println("  tar -xf onnxruntime-linux-x64-1.17.3.tgz")
-	fmt.Println("  sudo cp onnxruntime-linux-x64-1.17.3/lib/libonnxruntime.so* /usr/local/lib/")
-	fmt.Println("  sudo ldconfig")
-	fmt.Println()
+	log.Printf("ONNX Runtime library not found. Automatically downloading and extracting...")
+	if err := downloadAndExtractRuntime(); err != nil {
+		log.Printf("⚠ Failed to automatically download ONNX Runtime: %v", err)
+		fmt.Println()
+		fmt.Println("Please install it manually:")
+		fmt.Printf("  wget %s\n", onnxRuntimeURL)
+		fmt.Println("  tar -xf onnxruntime-linux-x64-1.17.3.tgz")
+		fmt.Println("  sudo cp onnxruntime-linux-x64-1.17.3/lib/libonnxruntime.so* /usr/local/lib/")
+		fmt.Println("  sudo ldconfig")
+	}
+}
+
+func downloadAndExtractRuntime() error {
+	log.Printf("Downloading ONNX Runtime tarball from %s ...", onnxRuntimeURL)
+	resp, err := http.Get(onnxRuntimeURL)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	gr, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		return err
+	}
+	defer gr.Close()
+
+	tr := tar.NewReader(gr)
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		if strings.HasSuffix(header.Name, "libonnxruntime.so.1.25.0") {
+			dest := "libonnxruntime.so"
+			log.Printf("Extracting %s → %s", header.Name, dest)
+			
+			f, err := os.OpenFile(dest, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0755)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+
+			if _, err := io.Copy(f, tr); err != nil {
+				return err
+			}
+			log.Printf("✓ Shared library %s extracted successfully to project root", dest)
+			return nil
+		}
+	}
+
+	return fmt.Errorf("libonnxruntime.so.1.25.0 not found in tarball")
 }

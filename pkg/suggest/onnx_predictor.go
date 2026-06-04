@@ -25,6 +25,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -46,7 +47,21 @@ type OnnxPredictor struct {
 // NewOnnxPredictor loads the ONNX model and GPT-2 vocabulary.
 func NewOnnxPredictor(modelPath, vocabPath string) (*OnnxPredictor, error) {
 	// Initialize ONNX Runtime environment
-	ort.SetSharedLibraryPath("libonnxruntime.so")
+	// Look for libonnxruntime.so in the executable's directory first, then current working directory
+	libPath := "libonnxruntime.so"
+	if exePath, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exePath)
+		p := filepath.Join(exeDir, "libonnxruntime.so")
+		if _, err := os.Stat(p); err == nil {
+			libPath = p
+		}
+	}
+	if _, err := os.Stat(libPath); err != nil {
+		if _, err := os.Stat("./libonnxruntime.so"); err == nil {
+			libPath = "./libonnxruntime.so"
+		}
+	}
+	ort.SetSharedLibraryPath(libPath)
 	if err := ort.InitializeEnvironment(); err != nil {
 		return nil, fmt.Errorf("onnxruntime init: %w", err)
 	}
@@ -60,7 +75,7 @@ func NewOnnxPredictor(modelPath, vocabPath string) (*OnnxPredictor, error) {
 	// Create dynamic session (variable sequence length)
 	session, err := ort.NewDynamicAdvancedSession(
 		modelPath,
-		[]string{"input_ids"},
+		[]string{"input_ids", "attention_mask"},
 		[]string{"logits"},
 		nil,
 	)
@@ -106,15 +121,35 @@ func (p *OnnxPredictor) PredictNextContext(words []string) []string {
 
 	seqLen := int64(len(inputIDs))
 
+	// Convert inputIDs to int64 for the ONNX model
+	inputIDs64 := make([]int64, len(inputIDs))
+	for i, id := range inputIDs {
+		inputIDs64[i] = int64(id)
+	}
+
 	// Create input tensor [1, seqLen]
 	inputTensor, err := ort.NewTensor(
 		ort.NewShape(1, seqLen),
-		inputIDs,
+		inputIDs64,
 	)
 	if err != nil {
 		return p.builtin.PredictNextContext(words)
 	}
 	defer inputTensor.Destroy()
+
+	// Create attention mask tensor [1, seqLen] containing all 1s
+	attentionMask := make([]int64, seqLen)
+	for i := range attentionMask {
+		attentionMask[i] = 1
+	}
+	maskTensor, err := ort.NewTensor(
+		ort.NewShape(1, seqLen),
+		attentionMask,
+	)
+	if err != nil {
+		return p.builtin.PredictNextContext(words)
+	}
+	defer maskTensor.Destroy()
 
 	// Output: [1, seqLen, vocabSize]
 	outputTensor, err := ort.NewEmptyTensor[float32](
@@ -127,7 +162,7 @@ func (p *OnnxPredictor) PredictNextContext(words []string) []string {
 
 	// Run inference
 	if err := p.session.Run(
-		[]ort.ArbitraryTensor{inputTensor},
+		[]ort.ArbitraryTensor{inputTensor, maskTensor},
 		[]ort.ArbitraryTensor{outputTensor},
 	); err != nil {
 		log.Printf("[OnnxPredictor] inference error: %v", err)
@@ -142,7 +177,10 @@ func (p *OnnxPredictor) PredictNextContext(words []string) []string {
 	}
 	logits := data[offset : offset+p.vocabSize]
 
-	return p.topKWords(logits, 5)
+	lastWord := strings.ToLower(strings.TrimSpace(words[len(words)-1]))
+	isSentenceEnd := strings.HasSuffix(lastWord, ".") || strings.HasSuffix(lastWord, "?") || strings.HasSuffix(lastWord, "!")
+
+	return p.topKWords(logits, 5, isSentenceEnd)
 }
 
 // tokenize converts text to GPT-2 token IDs using a simplified BPE approach.
@@ -175,7 +213,7 @@ func (p *OnnxPredictor) tokenize(text string) ([]int32, error) {
 
 // topKWords picks the top-k token IDs by logit, filters for whole-word tokens
 // (those starting with Ġ in GPT-2), and converts to lowercase word strings.
-func (p *OnnxPredictor) topKWords(logits []float32, k int) []string {
+func (p *OnnxPredictor) topKWords(logits []float32, k int, blendStarters bool) []string {
 	type entry struct {
 		id    int
 		score float32
@@ -231,8 +269,8 @@ func (p *OnnxPredictor) topKWords(logits []float32, k int) []string {
 		result = append(result, word)
 	}
 
-	// Blend in builtin starters if we didn't get enough
-	if len(result) < k {
+	// Blend in builtin starters if we didn't get enough and we are starting a new sentence
+	if len(result) < k && blendStarters {
 		for _, w := range p.builtin.Starters() {
 			if !seen[w] {
 				result = append(result, w)

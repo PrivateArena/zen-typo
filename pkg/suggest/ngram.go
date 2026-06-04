@@ -395,9 +395,15 @@ func (b *BigramEngine) PredictNextContext(words []string) []string {
 		}
 	}
 
-	// 4. Fallback: if still empty, return starters
+	// 4. Fallback: if still empty, return starters only if ending a sentence
 	if len(candidates) == 0 {
-		return b.starters[:min5(5, len(b.starters))]
+		if len(lastWord) > 0 {
+			lastChar := lastWord[len(lastWord)-1]
+			if lastChar == '.' || lastChar == '?' || lastChar == '!' {
+				return b.starters[:min5(5, len(b.starters))]
+			}
+		}
+		return nil
 	}
 
 	// Sort and return top 5

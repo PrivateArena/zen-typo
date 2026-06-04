@@ -44,6 +44,10 @@ func main() {
 
 	// 3. Initialize spelling engine
 	suggestEngine = suggest.NewEngine()
+	dbPath := cfg.ResolvePath(cfg.NgramDBPath)
+	if err := suggest.LoadCorpusWordFrequencies(dbPath, suggestEngine); err != nil {
+		log.Printf("[Main] SQLite corpus hydration warning: %v (database might be empty or missing)", err)
+	}
 
 	// 4. Initialize next-word predictor from config
 	predictor = buildPredictor(cfg)
@@ -172,15 +176,18 @@ func onTextChanged(text string) {
 		var merged []string
 		seen := make(map[string]bool)
 
-		// Only blend context predictions when there are actual prior words
+		// Only blend context predictions when there are actual prior words and they match prefix
 		if len(words) >= 2 {
+			prefix := strings.ToLower(lastFrag)
 			for _, s := range predictor.PredictNextContext(words[:len(words)-1]) {
-				if !seen[s] {
-					merged = append(merged, s)
-					seen[s] = true
-				}
-				if len(merged) >= 2 {
-					break
+				if strings.HasPrefix(strings.ToLower(s), prefix) {
+					if !seen[s] {
+						merged = append(merged, s)
+						seen[s] = true
+					}
+					if len(merged) >= 2 {
+						break
+					}
 				}
 			}
 		}

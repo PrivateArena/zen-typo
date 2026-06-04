@@ -51,10 +51,20 @@ func TestUserTransitionOutranksSeeds(t *testing.T) {
 
 func TestPredictNextContextFallbackToStarters(t *testing.T) {
 	b := NewBigramEngine()
-	// An unknown word should fall back gracefully (starters or empty, not panic)
-	results := b.PredictNextContext([]string{"xyzzyqqqq"})
-	// Should not panic; may return starters or empty slice
-	_ = results
+	// A normal unknown word should NOT return starters (should return nil/empty)
+	resultsNormal := b.PredictNextContext([]string{"xyzzyqqqq"})
+	if len(resultsNormal) > 0 {
+		t.Errorf("Expected empty/nil next-word predictions for unknown normal word, got %v", resultsNormal)
+	}
+
+	// An unknown word ending with sentence-ending punctuation should return starters
+	resultsEnd := b.PredictNextContext([]string{"xyzzyqqqq."})
+	if len(resultsEnd) == 0 {
+		t.Fatal("Expected starters to be returned for sentence-ending context, got nothing")
+	}
+	if resultsEnd[0] != "i" {
+		t.Errorf("Expected first starter to be 'i', got %q", resultsEnd[0])
+	}
 }
 
 func TestResultsCappedAtFive(t *testing.T) {
@@ -100,6 +110,9 @@ func TestEngineEmptyInput(t *testing.T) {
 
 func TestEnginePrefixCompletion(t *testing.T) {
 	e := NewEngine()
+	e.AddWord("thank", 100)
+	e.AddWord("that", 200)
+	e.AddWord("than", 150)
 	results := e.Suggest("tha")
 	found := false
 	for _, r := range results {
@@ -115,9 +128,27 @@ func TestEnginePrefixCompletion(t *testing.T) {
 
 func TestEngineSpellingReturnsResults(t *testing.T) {
 	e := NewEngine()
+	e.AddWord("the", 1000)
 	// Any near-word should return at least one result (engine is functional)
 	results := e.Suggest("teh")
 	if len(results) == 0 {
 		t.Error("Suggest('teh') returned no results; engine may be broken")
+	}
+}
+
+func TestEnginePrefixPriority(t *testing.T) {
+	e := NewEngine()
+	// Manually inject words to control frequency and distance precisely
+	e.AddWord("we", 50000)      // very high frequency typo candidate for "wh"
+	e.AddWord("who", 50)       // low frequency prefix match candidate for "wh"
+	e.AddWord("why", 50)       // low frequency prefix match candidate for "wh"
+
+	results := e.Suggest("wh")
+	if len(results) == 0 {
+		t.Fatal("expected suggestions for 'wh'")
+	}
+	// "who" and "why" must rank before "we" because they are prefix completions
+	if results[0] == "we" {
+		t.Errorf("expected prefix completion to rank before typo correction 'we', got: %v", results)
 	}
 }

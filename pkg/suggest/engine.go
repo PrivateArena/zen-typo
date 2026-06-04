@@ -1,9 +1,7 @@
 package suggest
 
 import (
-	"bufio"
 	"math"
-	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -16,10 +14,10 @@ type WordInfo struct {
 }
 
 type Engine struct {
-	mu           sync.RWMutex
-	dictionary   map[string]*WordInfo
-	deletes      map[string][]string
-	maxDistance  int
+	mu          sync.RWMutex
+	dictionary  map[string]*WordInfo
+	deletes     map[string][]string
+	maxDistance int
 }
 
 var qwertyCoords = map[rune][2]float64{
@@ -29,57 +27,10 @@ var qwertyCoords = map[rune][2]float64{
 }
 
 func NewEngine() *Engine {
-	e := &Engine{
+	return &Engine{
 		dictionary:  make(map[string]*WordInfo),
 		deletes:     make(map[string][]string),
 		maxDistance: 2,
-	}
-
-	e.loadCommonWords()
-	e.loadSystemDictionary()
-
-	return e
-}
-
-func (e *Engine) loadCommonWords() {
-	for word, freq := range commonEnglishWords {
-		e.AddWord(word, freq)
-	}
-}
-
-func (e *Engine) loadSystemDictionary() {
-	paths := []string{"/usr/share/dict/words", "/etc/dictionaries-common/words"}
-	var file *os.File
-	var err error
-	for _, p := range paths {
-		file, err = os.Open(p)
-		if err == nil {
-			break
-		}
-	}
-	if err != nil {
-		return
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		word := strings.TrimSpace(scanner.Text())
-		if len(word) == 0 {
-			continue
-		}
-		// Convert to lowercase and filter non-alphabetic
-		word = strings.ToLower(word)
-		if isAlpha(word) {
-			// Don't overwrite higher frequency of common words
-			e.mu.Lock()
-			if _, exists := e.dictionary[word]; !exists {
-				e.mu.Unlock()
-				e.AddWord(word, 50) // Elevated fallback frequency for competition
-			} else {
-				e.mu.Unlock()
-			}
-		}
 	}
 }
 
@@ -206,7 +157,7 @@ func (e *Engine) Suggest(input string) []string {
 	}
 
 	// 3. Prefix auto-completion search
-	if len(input) >= 2 {
+	if len(input) >= 1 {
 		for w, info := range e.dictionary {
 			if strings.HasPrefix(w, input) && len(w) > len(input) {
 				dist := len(w) - len(input)
@@ -225,6 +176,10 @@ func (e *Engine) Suggest(input string) []string {
 	// Sort candidates
 	var sorted []Candidate
 	for w, s := range candidatesMap {
+		// Boost prefix matches/completions to rank above typo corrections
+		if strings.HasPrefix(strings.ToLower(w), strings.ToLower(input)) {
+			s += 1e9
+		}
 		sorted = append(sorted, Candidate{Word: w, Score: s})
 	}
 
@@ -233,7 +188,11 @@ func (e *Engine) Suggest(input string) []string {
 	})
 
 	var result []string
-	for i := 0; i < len(sorted) && i < 5; i++ {
+	for i := 0; i < len(sorted) && len(result) < 5; i++ {
+		// Exclude suggestions that are exactly equal to the typed input
+		if strings.EqualFold(sorted[i].Word, input) {
+			continue
+		}
 		result = append(result, sorted[i].Word)
 	}
 
@@ -273,8 +232,8 @@ func (e *Engine) editDistance(s1, s2 string) float64 {
 					subCost = 0.5
 				}
 				matrix[i][j] = minFloat(
-					matrix[i-1][j]+1.0,      // Deletion
-					matrix[i][j-1]+1.0,      // Insertion
+					matrix[i-1][j]+1.0,       // Deletion
+					matrix[i][j-1]+1.0,       // Insertion
 					matrix[i-1][j-1]+subCost, // Substitution
 				)
 			}

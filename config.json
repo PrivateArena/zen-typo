@@ -1,0 +1,8 @@
+{
+  "engine": "onnx",
+  "ngram_db_path": "ngrams.db",
+  "onnx_model_path": "model/distilgpt2.onnx",
+  "onnx_vocab_path": "model/vocab.json",
+  "onnx_merges_path": "model/merges.txt",
+  "max_suggestions": 5
+}

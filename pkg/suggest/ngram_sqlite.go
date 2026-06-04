@@ -31,7 +31,7 @@ type SQLitePredictor struct {
 func NewSQLitePredictor(dbPath string) (*SQLitePredictor, error) {
 	builtin := NewBigramEngine()
 
-	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?mode=ro&_journal=OFF&_sync=OFF&cache=shared", dbPath))
+	db, err := sql.Open("sqlite3", dbPath+"?mode=ro&_journal=OFF&_sync=OFF&cache=shared")
 	if err != nil {
 		log.Printf("[SQLitePredictor] Cannot open %s: %v — using builtin fallback", dbPath, err)
 		return &SQLitePredictor{builtin: builtin}, nil
@@ -121,7 +121,13 @@ func (p *SQLitePredictor) PredictNextContext(words []string) []string {
 	}
 
 	if len(scores) == 0 {
-		return p.builtin.Starters()
+		if len(lastWord) > 0 {
+			lastChar := lastWord[len(lastWord)-1]
+			if lastChar == '.' || lastChar == '?' || lastChar == '!' {
+				return p.builtin.Starters()
+			}
+		}
+		return nil
 	}
 
 	return rankTop5(scores)
@@ -178,3 +184,38 @@ func (p *BuiltinPredictor) PredictNextContext(words []string) []string {
 }
 func (p *BuiltinPredictor) Starters() []string { return p.engine.Starters() }
 func (p *BuiltinPredictor) Close() error        { return nil }
+
+func LoadCorpusWordFrequencies(dbPath string, engine *Engine) error {
+	db, err := sql.Open("sqlite3", dbPath+"?mode=ro&_journal=OFF&_sync=OFF&cache=shared")
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Query sum of frequencies for each word in the bigrams table (both first and second words)
+	rows, err := db.Query(`
+		SELECT w, SUM(f) as total_freq FROM (
+			SELECT word as w, freq as f FROM bigrams
+			UNION ALL
+			SELECT next as w, freq as f FROM bigrams
+		)
+		GROUP BY w
+		ORDER BY total_freq DESC
+	`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	count := 0
+	for rows.Next() {
+		var word string
+		var freq int64
+		if err := rows.Scan(&word, &freq); err == nil {
+			engine.AddWord(word, freq)
+			count++
+		}
+	}
+	log.Printf("[Corpus] Hydrated spelling engine with %d words from %s", count, dbPath)
+	return nil
+}
