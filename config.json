@@ -4,8 +4,18 @@
   "onnx_model_path": "model/distilgpt2.onnx",
   "onnx_vocab_path": "model/vocab.json",
   "onnx_merges_path": "model/merges.txt",
-  "lazy_onnx": false,
+  "lazy_onnx": true,
   "max_suggestions": 5,
   "enable_sentence_suggestions": false,
-  "max_sentence_suggestions": 1
+  "max_sentence_suggestions": 1,
+  "enable_autocorrect": true,
+  "dict_path": "/usr/share/dict/words",
+  "autocorrect_ignore_apps": [
+    "terminal",
+    "kitty",
+    "alacritty",
+    "konsole",
+    "wezterm"
+  ],
+  "custom_words": []
 }

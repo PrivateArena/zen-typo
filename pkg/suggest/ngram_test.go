@@ -152,3 +152,24 @@ func TestEnginePrefixPriority(t *testing.T) {
 		t.Errorf("expected prefix completion to rank before typo correction 'we', got: %v", results)
 	}
 }
+
+func TestEngineSystemDict(t *testing.T) {
+	e := NewEngine()
+	// Let's add a word in the deletes index to trigger typo correction if the word was not valid
+	e.AddWord("tapping", 1000)
+
+	// Since "mapping" is not in dictionary, it would normally correct to "tapping"
+	corr, _, found := e.BestCorrection("mapping")
+	if !found || corr != "tapping" {
+		t.Fatalf("expected mapping to be corrected to tapping, got: %q, %t", corr, found)
+	}
+
+	// Now let's add "mapping" to custom words
+	e.LoadCustomWords([]string{"mapping"})
+
+	// Now it should be considered valid, so BestCorrection should return found = false
+	corr2, _, found2 := e.BestCorrection("mapping")
+	if found2 {
+		t.Fatalf("expected mapping to be considered valid and not corrected, but got: %q", corr2)
+	}
+}

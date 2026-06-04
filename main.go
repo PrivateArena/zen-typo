@@ -55,6 +55,17 @@ func main() {
 		log.Printf("[Main] SQLite corpus hydration warning: %v (database might be empty or missing)", err)
 	}
 
+	// Hydrate system/custom dictionary if configured
+	if cfg.DictPath != "" {
+		dictPath := cfg.ResolvePath(cfg.DictPath)
+		if err := suggestEngine.LoadDictionary(dictPath); err != nil {
+			log.Printf("[Main] System dictionary load warning: %v", err)
+		}
+	}
+	if len(cfg.CustomWords) > 0 {
+		suggestEngine.LoadCustomWords(cfg.CustomWords)
+	}
+
 	// 4. Initialize next-word predictor from config
 	predictor = buildPredictor(cfg)
 	defer predictor.Close()
@@ -230,6 +241,11 @@ func onTrackerFragment(fragment string, words []string) {
 // It silently replaces the word if a high-confidence correction exists.
 func onTrackerSpace(word string, words []string) {
 	if !cfg.EnableAutocorrect || uiCtrl.IsVisible() {
+		return
+	}
+	// Check if the current active window should be ignored for autocorrect
+	activeClass, err := inject.GetActiveWindowClass()
+	if err == nil && inject.ShouldIgnoreAutocorrect(activeClass, cfg.AutocorrectIgnoreApps) {
 		return
 	}
 	correction, dist, found := suggestEngine.BestCorrection(word)

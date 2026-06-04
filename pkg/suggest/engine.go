@@ -1,7 +1,10 @@
 package suggest
 
 import (
+	"bufio"
+	"log"
 	"math"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -18,6 +21,7 @@ type Engine struct {
 	dictionary  map[string]*WordInfo
 	deletes     map[string][]string
 	maxDistance int
+	systemDict  map[string]bool
 }
 
 var qwertyCoords = map[rune][2]float64{
@@ -31,6 +35,7 @@ func NewEngine() *Engine {
 		dictionary:  make(map[string]*WordInfo),
 		deletes:     make(map[string][]string),
 		maxDistance: 2,
+		systemDict:  make(map[string]bool),
 	}
 }
 
@@ -203,8 +208,60 @@ func (e *Engine) IsValidWord(word string) bool {
 	word = strings.ToLower(word)
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	_, exists := e.dictionary[word]
-	return exists
+	if _, exists := e.dictionary[word]; exists {
+		return true
+	}
+	if e.systemDict != nil && e.systemDict[word] {
+		return true
+	}
+	return false
+}
+
+// LoadDictionary reads a text file containing one word per line and populates
+// the system dictionary lookup map (e.systemDict).
+func (e *Engine) LoadDictionary(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.systemDict == nil {
+		e.systemDict = make(map[string]bool)
+	}
+
+	scanner := bufio.NewScanner(file)
+	count := 0
+	for scanner.Scan() {
+		word := strings.TrimSpace(strings.ToLower(scanner.Text()))
+		if len(word) >= 2 {
+			e.systemDict[word] = true
+			count++
+		}
+	}
+	log.Printf("[Engine] Loaded %d words into system dictionary from %s", count, path)
+	return scanner.Err()
+}
+
+// LoadCustomWords adds user-defined words directly to the system dictionary lookup.
+func (e *Engine) LoadCustomWords(words []string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.systemDict == nil {
+		e.systemDict = make(map[string]bool)
+	}
+
+	for _, w := range words {
+		word := strings.TrimSpace(strings.ToLower(w))
+		if len(word) > 0 {
+			e.systemDict[word] = true
+		}
+	}
+	log.Printf("[Engine] Loaded %d custom words into system dictionary", len(words))
 }
 
 // BestCorrection returns the single best spell correction for input and its
@@ -220,6 +277,9 @@ func (e *Engine) BestCorrection(input string) (word string, dist float64, found 
 	defer e.mu.RUnlock()
 
 	if _, exists := e.dictionary[input]; exists {
+		return "", 0, false // already valid
+	}
+	if e.systemDict != nil && e.systemDict[input] {
 		return "", 0, false // already valid
 	}
 

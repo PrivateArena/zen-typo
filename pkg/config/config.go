@@ -54,6 +54,16 @@ type Config struct {
 	// 0.5 = keyboard-adjacent single char; 1.0 = any single edit. Default: 1.0.
 	AutocorrectMaxDist float64 `json:"autocorrect_max_dist"`
 
+	// DictPath is the path to a system or custom plain-text dictionary.
+	// Loaded at startup to prevent autocorrecting valid words.
+	DictPath string `json:"dict_path"`
+
+	// AutocorrectIgnoreApps lists window classes or instance names to skip autocorrect in.
+	AutocorrectIgnoreApps []string `json:"autocorrect_ignore_apps"`
+
+	// CustomWords lists user-specified valid words that should never be autocorrected.
+	CustomWords []string `json:"custom_words"`
+
 	// LazyOnnx loads the ONNX predictor in the background so startup is instant.
 	LazyOnnx bool `json:"lazy_onnx"`
 }
@@ -72,6 +82,9 @@ func Default() *Config {
 		EnableStrip:               true,
 		EnableAutocorrect:         true,
 		AutocorrectMaxDist:        1.0,
+		DictPath:                  "/usr/share/dict/words",
+		AutocorrectIgnoreApps:     []string{"terminal", "kitty", "alacritty", "konsole"},
+		CustomWords:               []string{},
 		LazyOnnx:                  true,
 	}
 }
