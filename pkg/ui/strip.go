@@ -127,7 +127,7 @@ window {
 #strip-label {
 	color: #e8e0ff;
 	font-family: 'Inter', 'Roboto', sans-serif;
-	font-size: 13px;
+	font-size: 23px;
 	font-weight: 500;
 }
 `
