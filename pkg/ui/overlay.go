@@ -6,10 +6,13 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gotk3/gotk3/gdk"
 	"github.com/gotk3/gotk3/glib"
 	"github.com/gotk3/gotk3/gtk"
+	"github.com/jezek/xgb/xproto"
+	"github.com/jezek/xgbutil"
 )
 
 const maxSlots = 7
@@ -62,6 +65,9 @@ func Start(onTextChanged func(text string), onCommit func(text string), onHide f
 	win.SetKeepAbove(true)
 	win.SetSkipPagerHint(true)
 	win.SetSkipTaskbarHint(true)
+	win.SetFocusOnMap(true)
+	win.SetAcceptFocus(true)
+	win.SetTypeHint(gdk.WINDOW_TYPE_HINT_POPUP_MENU)
 	win.SetDefaultSize(800, 360)
 	win.SetPosition(gtk.WIN_POS_CENTER)
 
@@ -428,8 +434,22 @@ func (c *UIController) Show() {
 	glib.IdleAdd(func() {
 		c.window.ShowAll()
 		c.entry.SetText("")
-		c.window.Present()
-		c.entry.GrabFocus()
+		c.window.SetKeepAbove(true)
+		c.window.PresentWithTime(uint32(gdk.CURRENT_TIME))
+
+		// Defer focus grab to a nested idle handler to guarantee the window is mapped and focused
+		glib.IdleAdd(func() {
+			c.entry.GrabFocus()
+			if gdkWin, err := c.window.GetWindow(); err == nil && gdkWin != nil {
+				xid := gdkWin.GetXID()
+				go func(id uint32) {
+					// Wait 50ms for X11 mapping
+					time.Sleep(50 * time.Millisecond)
+					forceX11Focus(id)
+				}(xid)
+			}
+		})
+
 		c.mu.Lock()
 		c.candidates = nil
 		c.selectedIndex = -1
@@ -596,4 +616,15 @@ func (c *UIController) applySentence(index int) {
 		c.entry.SetText(newText)
 		c.entry.SetPosition(-1)
 	})
+}
+
+func forceX11Focus(xid uint32) {
+	xu, err := xgbutil.NewConn()
+	if err != nil {
+		return
+	}
+	defer xu.Conn().Close()
+
+	// Direct X11 SetInputFocus bypasses any window manager focus stealing prevention policies
+	_ = xproto.SetInputFocusChecked(xu.Conn(), xproto.InputFocusParent, xproto.Window(xid), xproto.Timestamp(0)).Check()
 }
