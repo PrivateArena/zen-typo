@@ -111,15 +111,28 @@ import (
 )
 
 var (
-	triggerCallback func()
-	ctrlKeycode     int
-	lastPressTime   time.Time
-	ctrlPressed     bool
-	mu              sync.Mutex
+	triggerCallback  func()
+	keyEventCallback func(keycode int, isPress bool) // raw feed for word tracker
+	ctrlKeycode      int
+	lastPressTime    time.Time
+	ctrlPressed      bool
+	mu               sync.Mutex
+	suppressUntil    time.Time // ignore synthetic XTest events during injection
 )
 
 //export goKeyCallback
 func goKeyCallback(keycode C.int, isPress C.int) {
+	// Raw feed — called before the double-Ctrl lock so the tracker
+	// can process every key independently. Skipped during injection.
+	if cb := keyEventCallback; cb != nil {
+		mu.Lock()
+		suppressed := time.Now().Before(suppressUntil)
+		mu.Unlock()
+		if !suppressed {
+			cb(int(keycode), isPress == 1)
+		}
+	}
+
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -149,6 +162,20 @@ func goKeyCallback(keycode C.int, isPress C.int) {
 			lastPressTime = time.Time{}
 		}
 	}
+}
+
+// SetKeyEventCallback registers a callback that receives every raw key event.
+// Call before Listen. Safe to set once at startup.
+func SetKeyEventCallback(cb func(keycode int, isPress bool)) {
+	keyEventCallback = cb
+}
+
+// Suppress blocks the raw key callback for the given duration.
+// Call this before injecting synthetic keystrokes to prevent autocorrect loops.
+func Suppress(d time.Duration) {
+	mu.Lock()
+	suppressUntil = time.Now().Add(d)
+	mu.Unlock()
 }
 
 // Listen starts monitoring for double-Ctrl hotkey triggers asynchronously.

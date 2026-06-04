@@ -207,6 +207,49 @@ func (e *Engine) IsValidWord(word string) bool {
 	return exists
 }
 
+// BestCorrection returns the single best spell correction for input and its
+// edit distance. Returns ("", 0, false) when the word is already valid, too
+// short, or no candidate is found within maxDistance.
+func (e *Engine) BestCorrection(input string) (word string, dist float64, found bool) {
+	input = strings.TrimSpace(strings.ToLower(input))
+	if len(input) < 3 {
+		return "", 0, false
+	}
+
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	if _, exists := e.dictionary[input]; exists {
+		return "", 0, false // already valid
+	}
+
+	type cand struct {
+		word string
+		dist float64
+		freq int64
+	}
+	var best *cand
+
+	for del := range e.getDeletes(input, e.maxDistance) {
+		for _, w := range e.deletes[del] {
+			d := e.editDistance(input, w)
+			if d > float64(e.maxDistance) {
+				continue
+			}
+			info := e.dictionary[w]
+			freq := info.Frequency + info.UserFreq*5
+			if best == nil || d < best.dist || (d == best.dist && freq > best.freq) {
+				best = &cand{word: w, dist: d, freq: freq}
+			}
+		}
+	}
+
+	if best == nil {
+		return "", 0, false
+	}
+	return best.word, best.dist, true
+}
+
 func (e *Engine) editDistance(s1, s2 string) float64 {
 	r1, r2 := []rune(s1), []rune(s2)
 	len1, len2 := len(r1), len(r2)

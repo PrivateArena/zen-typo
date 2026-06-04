@@ -16,15 +16,18 @@ import (
 	"zen-typo/pkg/db"
 	"zen-typo/pkg/hotkey"
 	"zen-typo/pkg/inject"
+	"zen-typo/pkg/input"
 	"zen-typo/pkg/suggest"
 	"zen-typo/pkg/ui"
 )
 
 var (
 	suggestEngine *suggest.Engine
-	predictor     suggest.Predictor // active next-word predictor (builtin|ngram|onnx)
+	predictor     suggest.Predictor
 	database      *db.Database
 	uiCtrl        *ui.UIController
+	strip         *ui.Strip
+	tracker       *input.WordTracker
 	cfg           *config.Config
 )
 
@@ -65,7 +68,32 @@ func main() {
 		log.Fatalf("Failed to start UI: %v", err)
 	}
 
-	// 7. Start Hotkey Listener
+	// 7. Word tracker — feeds strip + autocorrect from raw key events
+	tracker = input.NewWordTracker()
+	tracker.OnFragment = onTrackerFragment
+	tracker.OnSpace = onTrackerSpace
+	tracker.OnBoundary = func() {
+		if strip != nil {
+			strip.UpdateCandidates(nil, 0)
+		}
+	}
+	hotkey.SetKeyEventCallback(tracker.Feed)
+
+	// 8. Ambient strip (created after GTK init)
+	if cfg.EnableStrip {
+		strip, err = ui.NewStrip()
+		if err != nil {
+			log.Printf("[Strip] Failed to create strip: %v", err)
+		} else {
+			strip.OnSelect = func(word string, fragLen int) {
+				hotkey.Suppress(400 * time.Millisecond)
+				tracker.Reset()
+				if err := inject.ReplaceWord(fragLen, word); err != nil {
+					log.Printf("[Strip] Inject error: %v", err)
+				}
+			}
+		}
+	}
 	hotkey.Listen(func() {
 		if uiCtrl.IsVisible() {
 			log.Println("Double-Ctrl detected while visible! Committing current entry...")
@@ -74,6 +102,12 @@ func main() {
 			onCommit(text, false)
 		} else {
 			log.Println("Double-Ctrl detected! Showing overlay...")
+			if tracker != nil {
+				tracker.Reset() // don't mix ambient fragment with overlay input
+			}
+			if strip != nil {
+				strip.Hide()
+			}
 			uiCtrl.Show()
 		}
 	})
@@ -88,6 +122,8 @@ func main() {
 }
 
 // buildPredictor constructs the active Predictor based on config.Engine.
+// When cfg.LazyOnnx is true and engine is "ngram", it wraps the SQLite predictor
+// in a LazyPredictor that hot-swaps to ONNX once background loading completes.
 func buildPredictor(cfg *config.Config) suggest.Predictor {
 	switch cfg.Engine {
 	case config.EngineNgram:
@@ -95,13 +131,32 @@ func buildPredictor(cfg *config.Config) suggest.Predictor {
 		p, err := suggest.NewSQLitePredictor(dbPath)
 		if err != nil {
 			log.Printf("[Predictor] SQLite init error: %v — falling back to builtin", err)
-			return suggest.NewBuiltinPredictor()
+			p = nil
 		}
-		return p
+		var fallback suggest.Predictor
+		if p != nil {
+			fallback = p
+		} else {
+			fallback = suggest.NewBuiltinPredictor()
+		}
+		// If lazy_onnx is enabled, hot-swap to ONNX in background
+		if cfg.LazyOnnx {
+			modelPath := cfg.ResolvePath(cfg.OnnxModelPath)
+			vocabPath := cfg.ResolvePath(cfg.OnnxVocabPath)
+			return suggest.NewLazyPredictor(fallback, func() (suggest.Predictor, error) {
+				return suggest.NewOnnxPredictor(modelPath, vocabPath)
+			})
+		}
+		return fallback
 
 	case config.EngineOnnx:
 		modelPath := cfg.ResolvePath(cfg.OnnxModelPath)
 		vocabPath := cfg.ResolvePath(cfg.OnnxVocabPath)
+		if cfg.LazyOnnx {
+			return suggest.NewLazyPredictor(suggest.NewBuiltinPredictor(), func() (suggest.Predictor, error) {
+				return suggest.NewOnnxPredictor(modelPath, vocabPath)
+			})
+		}
 		p, err := suggest.NewOnnxPredictor(modelPath, vocabPath)
 		if err != nil {
 			log.Printf("[Predictor] ONNX init error: %v — falling back to builtin", err)
@@ -149,6 +204,48 @@ func hydrateFromDB() {
 	} else {
 		log.Printf("Failed to load learned bigrams: %v", err)
 	}
+}
+
+// onTrackerFragment is called by the word tracker on every keystroke.
+// It updates the ambient strip with fresh spell/prefix candidates.
+func onTrackerFragment(fragment string, words []string) {
+	if strip == nil || uiCtrl.IsVisible() {
+		return // strip hidden while overlay is open
+	}
+	if len(fragment) == 0 {
+		// Show next-word starters based on context
+		if len(words) > 0 {
+			candidates := predictor.PredictNextContext(words)
+			strip.UpdateCandidates(candidates, 0)
+		} else {
+			strip.UpdateCandidates(nil, 0)
+		}
+		return
+	}
+	candidates := suggestEngine.Suggest(fragment)
+	strip.UpdateCandidates(candidates, len([]rune(fragment)))
+}
+
+// onTrackerSpace is called when the user presses Space, committing a word.
+// It silently replaces the word if a high-confidence correction exists.
+func onTrackerSpace(word string, words []string) {
+	if !cfg.EnableAutocorrect || uiCtrl.IsVisible() {
+		return
+	}
+	correction, dist, found := suggestEngine.BestCorrection(word)
+	if !found || dist > cfg.AutocorrectMaxDist {
+		return
+	}
+	log.Printf("[Autocorrect] %q → %q (dist=%.1f)", word, correction, dist)
+	hotkey.Suppress(500 * time.Millisecond)
+	if tracker != nil {
+		tracker.Reset()
+	}
+	go func() {
+		if err := inject.ReplaceWord(len([]rune(word)), correction); err != nil {
+			log.Printf("[Autocorrect] Inject error: %v", err)
+		}
+	}()
 }
 
 var (

@@ -43,6 +43,19 @@ type Config struct {
 
 	// MaxSentenceSuggestions controls how many sentence candidates are shown (1–3).
 	MaxSentenceSuggestions int `json:"max_sentence_suggestions"`
+
+	// EnableStrip shows the ambient always-on tray strip while the user types.
+	EnableStrip bool `json:"enable_strip"`
+
+	// EnableAutocorrect silently replaces high-confidence typos when Space is pressed.
+	EnableAutocorrect bool `json:"enable_autocorrect"`
+
+	// AutocorrectMaxDist is the maximum edit distance accepted for silent correction.
+	// 0.5 = keyboard-adjacent single char; 1.0 = any single edit. Default: 1.0.
+	AutocorrectMaxDist float64 `json:"autocorrect_max_dist"`
+
+	// LazyOnnx loads the ONNX predictor in the background so startup is instant.
+	LazyOnnx bool `json:"lazy_onnx"`
 }
 
 // Default returns a config with sensible out-of-the-box values.
@@ -56,6 +69,10 @@ func Default() *Config {
 		MaxSuggestions:            5,
 		EnableSentenceSuggestions: true,
 		MaxSentenceSuggestions:    3,
+		EnableStrip:               true,
+		EnableAutocorrect:         true,
+		AutocorrectMaxDist:        1.0,
+		LazyOnnx:                  true,
 	}
 }
 
