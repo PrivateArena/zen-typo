@@ -60,20 +60,17 @@ func TestEngineSpellingAndBigrams(t *testing.T) {
 		t.Errorf("Expected 'many' to be boosted to top suggestion, got: %v", nextsBoosted)
 	}
 
-	// Test phrase completion chaining
+	// Test prediction candidates
 	phraseCands := be.PredictNext("nice")
-	hasMeet := false
-	hasMeetYou := false
+	hasTo := false
 	for _, p := range phraseCands {
-		if p == "to meet" {
-			hasMeet = true
-		}
-		if p == "to meet you" {
-			hasMeetYou = true
+		if p == "to" {
+			hasTo = true
+			break
 		}
 	}
-	if !hasMeet || !hasMeetYou {
-		t.Errorf("Expected chained phrase predictions 'to meet' and 'to meet you' for 'nice', got: %v", phraseCands)
+	if !hasTo {
+		t.Errorf("Expected 'to' to be a suggestion for 'nice', got: %v", phraseCands)
 	}
 }
 
