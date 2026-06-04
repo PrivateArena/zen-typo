@@ -15,7 +15,7 @@ static void recordCallback(XPointer userData, XRecordInterceptData* data) {
         unsigned char* eventData = data->data;
         int type = eventData[0] & 0x7F;
         int keycode = eventData[1];
-        
+
         if (type == KeyPress) {
             goKeyCallback(keycode, 1);
         } else if (type == KeyRelease) {
@@ -26,76 +26,77 @@ static void recordCallback(XPointer userData, XRecordInterceptData* data) {
 }
 
 static XRecordContext ctx = 0;
-static Display* recordDisplay = NULL;
+static Display*      recordDisplay = NULL;
 
 static int startRecord(char* displayName) {
+    // ctrlDisplay: used for XRecordCreateContext + XSync only.
+    // Closed by startRecord() itself after XRecordEnableContext returns.
     Display* ctrlDisplay = XOpenDisplay(displayName);
-    if (!ctrlDisplay) {
-        return 0;
-    }
-    
+    if (!ctrlDisplay) return 0;
+
     recordDisplay = XOpenDisplay(displayName);
     if (!recordDisplay) {
         XCloseDisplay(ctrlDisplay);
         return 0;
     }
-    
+
     XRecordRange* range = XRecordAllocRange();
     if (!range) {
         XCloseDisplay(ctrlDisplay);
         XCloseDisplay(recordDisplay);
         return 0;
     }
-    
+
     range->device_events.first = KeyPress;
-    range->device_events.last = KeyRelease;
-    
+    range->device_events.last  = KeyRelease;
+
     XRecordClientSpec spec = XRecordAllClients;
     ctx = XRecordCreateContext(ctrlDisplay, 0, &spec, 1, &range, 1);
     XFree(range);
-    
+
     if (!ctx) {
         XCloseDisplay(ctrlDisplay);
         XCloseDisplay(recordDisplay);
         return 0;
     }
-    
+
     XSync(ctrlDisplay, False);
-    
-    if (!XRecordEnableContextAsync(recordDisplay, ctx, recordCallback, NULL)) {
-        XRecordFreeContext(ctrlDisplay, ctx);
-        XCloseDisplay(ctrlDisplay);
-        XCloseDisplay(recordDisplay);
-        return 0;
-    }
-    
-    // Process replies loop (blocks)
-    while (recordDisplay) {
-        XRecordProcessReplies(recordDisplay);
-    }
-    
+
+    // ── BLOCKING CALL ─────────────────────────────────────────────────────────
+    // XRecordEnableContext (synchronous) parks on the kernel X11 socket fd.
+    // CPU usage: 0% when no key is pressed.
+    // Returns only after stopRecord() calls XRecordDisableContext() on its own
+    // separate connection (stopCtrl). ctx is freed by stopRecord() before we
+    // resume here, so we must NOT touch ctx after this point.
+    // ──────────────────────────────────────────────────────────────────────────
+    XRecordEnableContext(recordDisplay, ctx, recordCallback, NULL);
+
+    // Cleanup after unblocked — stopRecord has already freed ctx.
+    XCloseDisplay(recordDisplay);
+    recordDisplay = NULL;
+    XCloseDisplay(ctrlDisplay);
     return 1;
 }
 
 static void stopRecord(char* displayName) {
     if (ctx) {
-        Display* ctrlDisplay = XOpenDisplay(displayName);
-        if (ctrlDisplay) {
-            XRecordDisableContext(ctrlDisplay, ctx);
-            XRecordFreeContext(ctrlDisplay, ctx);
-            XCloseDisplay(ctrlDisplay);
+        // Open a short-lived control connection to send the disable command
+        // while startRecord's goroutine is still blocked inside XRecordEnableContext.
+        Display* stopCtrl = XOpenDisplay(displayName);
+        if (stopCtrl) {
+            XRecordDisableContext(stopCtrl, ctx);
+            XSync(stopCtrl, False);
+            XRecordFreeContext(stopCtrl, ctx);
+            XCloseDisplay(stopCtrl);
         }
         ctx = 0;
-    }
-    if (recordDisplay) {
-        XCloseDisplay(recordDisplay);
-        recordDisplay = NULL;
+        // recordDisplay is closed by startRecord() after Enable returns.
     }
 }
 
 static int getCtrlKeycode(char* displayName) {
     Display* d = XOpenDisplay(displayName);
-    if (!d) return 37; // fallback
+    if (!d) return 37; // fallback left-ctrl keycode
     int kc = XKeysymToKeycode(d, XK_Control_L);
     XCloseDisplay(d);
     return kc;
@@ -131,10 +132,9 @@ func goKeyCallback(keycode C.int, isPress C.int) {
 				now := time.Now()
 				if now.Sub(lastPressTime) < 300*time.Millisecond {
 					if triggerCallback != nil {
-						// Trigger the callback in a separate goroutine
 						go triggerCallback()
 					}
-					// Reset timer to prevent triple-taps from triggering twice
+					// Reset to prevent triple-tap from double-firing
 					lastPressTime = time.Time{}
 				} else {
 					lastPressTime = now
@@ -144,7 +144,7 @@ func goKeyCallback(keycode C.int, isPress C.int) {
 			ctrlPressed = false
 		}
 	} else {
-		// If any other key is pressed/released, reset the double-Ctrl sequence
+		// Any other key resets the double-Ctrl sequence
 		if isPress == 1 {
 			lastPressTime = time.Time{}
 		}
@@ -179,4 +179,3 @@ func Stop() {
 
 	C.stopRecord(cDisplayStr)
 }
-
