@@ -137,6 +137,10 @@ func (p *SQLitePredictor) Starters() []string {
 	return p.builtin.Starters()
 }
 
+func (p *SQLitePredictor) PredictSentences(words []string) []string {
+	return nil
+}
+
 func (p *SQLitePredictor) Close() error {
 	if p.stmtBigram != nil {
 		p.stmtBigram.Close()
@@ -181,6 +185,9 @@ func NewBuiltinPredictor() *BuiltinPredictor {
 
 func (p *BuiltinPredictor) PredictNextContext(words []string) []string {
 	return p.engine.PredictNextContext(words)
+}
+func (p *BuiltinPredictor) PredictSentences(words []string) []string {
+	return nil
 }
 func (p *BuiltinPredictor) Starters() []string { return p.engine.Starters() }
 func (p *BuiltinPredictor) Close() error        { return nil }

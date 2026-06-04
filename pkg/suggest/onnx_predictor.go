@@ -284,6 +284,227 @@ func (p *OnnxPredictor) topKWords(logits []float32, k int, blendStarters bool) [
 	return result
 }
 
+func (p *OnnxPredictor) PredictSentences(words []string) []string {
+	if len(words) == 0 {
+		return nil
+	}
+
+	// Join context words
+	contextWords := words
+	if len(contextWords) > 8 {
+		contextWords = contextWords[len(contextWords)-8:]
+	}
+	text := strings.Join(contextWords, " ")
+
+	inputIDs, err := p.tokenize(text)
+	if err != nil || len(inputIDs) == 0 {
+		return nil
+	}
+
+	if len(inputIDs) > p.maxContext {
+		inputIDs = inputIDs[len(inputIDs)-p.maxContext:]
+	}
+
+	seqLen := int64(len(inputIDs))
+	inputIDs64 := make([]int64, len(inputIDs))
+	for i, id := range inputIDs {
+		inputIDs64[i] = int64(id)
+	}
+
+	// 1. Get first-step logits to find top-3 starting tokens
+	inputTensor, err := ort.NewTensor(
+		ort.NewShape(1, seqLen),
+		inputIDs64,
+	)
+	if err != nil {
+		return nil
+	}
+	defer inputTensor.Destroy()
+
+	attentionMask := make([]int64, seqLen)
+	for i := range attentionMask {
+		attentionMask[i] = 1
+	}
+	maskTensor, err := ort.NewTensor(
+		ort.NewShape(1, seqLen),
+		attentionMask,
+	)
+	if err != nil {
+		return nil
+	}
+	defer maskTensor.Destroy()
+
+	outputTensor, err := ort.NewEmptyTensor[float32](
+		ort.NewShape(1, seqLen, int64(p.vocabSize)),
+	)
+	if err != nil {
+		return nil
+	}
+	defer outputTensor.Destroy()
+
+	if err := p.session.Run(
+		[]ort.ArbitraryTensor{inputTensor, maskTensor},
+		[]ort.ArbitraryTensor{outputTensor},
+	); err != nil {
+		return nil
+	}
+
+	data := outputTensor.GetData()
+	offset := int((seqLen - 1) * int64(p.vocabSize))
+	if offset+p.vocabSize > len(data) {
+		return nil
+	}
+	logits := data[offset : offset+p.vocabSize]
+
+	// Find top 30 token IDs to filter for valid starting tokens
+	type entry struct {
+		id    int
+		score float32
+	}
+	candidates := make([]entry, 0, len(logits))
+	for i, l := range logits {
+		candidates = append(candidates, entry{i, l})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].score > candidates[j].score
+	})
+
+	var sentences []string
+	seen := make(map[string]bool)
+
+	// We generate up to 3 sentence completions
+	for _, c := range candidates {
+		if len(sentences) >= 3 {
+			break
+		}
+		if c.id == 50256 { // skip endoftext as first token
+			continue
+		}
+
+		sentence := p.generateSentence(inputIDs64, int64(c.id))
+		// Clean up spaces/trailing spaces
+		sentence = strings.TrimSpace(sentence)
+		if len(sentence) < 3 || seen[sentence] {
+			continue
+		}
+		seen[sentence] = true
+		sentences = append(sentences, sentence)
+	}
+
+	return sentences
+}
+
+func (p *OnnxPredictor) generateSentence(startIDs []int64, firstTokenID int64) string {
+	currIDs := make([]int64, len(startIDs), len(startIDs)+12)
+	copy(currIDs, startIDs)
+	currIDs = append(currIDs, firstTokenID)
+
+	generated := []int32{int32(firstTokenID)}
+
+	maxGen := 10
+	for i := 0; i < maxGen; i++ {
+		seqLen := int64(len(currIDs))
+
+		// Create input tensor [1, seqLen]
+		inputTensor, err := ort.NewTensor(
+			ort.NewShape(1, seqLen),
+			currIDs,
+		)
+		if err != nil {
+			break
+		}
+
+		// Create attention mask tensor [1, seqLen] containing all 1s
+		attentionMask := make([]int64, seqLen)
+		for j := range attentionMask {
+			attentionMask[j] = 1
+		}
+		maskTensor, err := ort.NewTensor(
+			ort.NewShape(1, seqLen),
+			attentionMask,
+		)
+		if err != nil {
+			inputTensor.Destroy()
+			break
+		}
+
+		// Output: [1, seqLen, vocabSize]
+		outputTensor, err := ort.NewEmptyTensor[float32](
+			ort.NewShape(1, seqLen, int64(p.vocabSize)),
+		)
+		if err != nil {
+			inputTensor.Destroy()
+			maskTensor.Destroy()
+			break
+		}
+
+		// Run inference
+		if err := p.session.Run(
+			[]ort.ArbitraryTensor{inputTensor, maskTensor},
+			[]ort.ArbitraryTensor{outputTensor},
+		); err != nil {
+			inputTensor.Destroy()
+			maskTensor.Destroy()
+			outputTensor.Destroy()
+			break
+		}
+
+		data := outputTensor.GetData()
+		inputTensor.Destroy()
+		maskTensor.Destroy()
+		outputTensor.Destroy()
+
+		// Get logits for the last token
+		offset := int((seqLen - 1) * int64(p.vocabSize))
+		if offset+p.vocabSize > len(data) {
+			break
+		}
+		logits := data[offset : offset+p.vocabSize]
+
+		// Find token with max logit
+		bestTokenID := 0
+		maxLogit := float32(math.Inf(-1))
+		for id, l := range logits {
+			if l > maxLogit {
+				maxLogit = l
+				bestTokenID = id
+			}
+		}
+
+		// Check for stopping tokens: <|endoftext|> (50256) or punctuation
+		if bestTokenID == 50256 {
+			break
+		}
+		tok, ok := p.revVocab[int32(bestTokenID)]
+		if !ok {
+			break
+		}
+
+		generated = append(generated, int32(bestTokenID))
+		currIDs = append(currIDs, int64(bestTokenID))
+
+		if strings.ContainsAny(tok, ".!?") {
+			break
+		}
+	}
+
+	return p.decodeTokens(generated)
+}
+
+func (p *OnnxPredictor) decodeTokens(ids []int32) string {
+	var sb strings.Builder
+	for _, id := range ids {
+		if tok, ok := p.revVocab[id]; ok {
+			sb.WriteString(tok)
+		}
+	}
+	s := sb.String()
+	// Replace the GPT-2 byte/space characters
+	s = strings.ReplaceAll(s, "Ġ", " ")
+	s = strings.ReplaceAll(s, "Ċ", "\n")
+	return s
+}
+
 func (p *OnnxPredictor) Starters() []string { return p.builtin.Starters() }
 
 func (p *OnnxPredictor) Close() error {

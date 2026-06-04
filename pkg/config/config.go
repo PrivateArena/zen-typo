@@ -37,17 +37,25 @@ type Config struct {
 
 	// MaxSuggestions controls how many candidates are shown (1–7).
 	MaxSuggestions int `json:"max_suggestions"`
+
+	// EnableSentenceSuggestions enables full-sentence completions (Option 2/ONNX only).
+	EnableSentenceSuggestions bool `json:"enable_sentence_suggestions"`
+
+	// MaxSentenceSuggestions controls how many sentence candidates are shown (1–3).
+	MaxSentenceSuggestions int `json:"max_sentence_suggestions"`
 }
 
 // Default returns a config with sensible out-of-the-box values.
 func Default() *Config {
 	return &Config{
-		Engine:         EngineBuiltin,
-		NgramDBPath:    "ngrams.db",
-		OnnxModelPath:  "model/distilgpt2.onnx",
-		OnnxVocabPath:  "model/vocab.json",
-		OnnxMergesPath: "model/merges.txt",
-		MaxSuggestions: 5,
+		Engine:                    EngineBuiltin,
+		NgramDBPath:               "ngrams.db",
+		OnnxModelPath:             "model/distilgpt2.onnx",
+		OnnxVocabPath:             "model/vocab.json",
+		OnnxMergesPath:            "model/merges.txt",
+		MaxSuggestions:            5,
+		EnableSentenceSuggestions: true,
+		MaxSentenceSuggestions:    3,
 	}
 }
 
@@ -83,6 +91,13 @@ func Load() *Config {
 	}
 	if cfg.MaxSuggestions > 7 {
 		cfg.MaxSuggestions = 7
+	}
+
+	if cfg.MaxSentenceSuggestions < 1 {
+		cfg.MaxSentenceSuggestions = 1
+	}
+	if cfg.MaxSentenceSuggestions > 3 {
+		cfg.MaxSentenceSuggestions = 3
 	}
 
 	log.Printf("[Config] Loaded (engine=%s)", cfg.Engine)

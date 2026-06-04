@@ -27,10 +27,16 @@ type UIController struct {
 	candidateBox *gtk.Box
 	slots        [maxSlots]*candidateSlot // pre-allocated, never destroyed
 
-	candidates    []string
-	selectedIndex int
-	visible       bool
-	currentText   string
+	sentenceBox    *gtk.Box
+	sentenceBoxes  [3]*gtk.EventBox
+	sentenceLabels [3]*gtk.Label
+
+	candidates            []string
+	selectedIndex         int
+	sentences             []string
+	selectedSentenceIndex int
+	visible               bool
+	currentText           string
 
 	OnTextChanged func(text string)
 	OnCommit      func(text string)
@@ -56,7 +62,7 @@ func Start(onTextChanged func(text string), onCommit func(text string), onHide f
 	win.SetKeepAbove(true)
 	win.SetSkipPagerHint(true)
 	win.SetSkipTaskbarHint(true)
-	win.SetDefaultSize(800, 240)
+	win.SetDefaultSize(800, 360)
 	win.SetPosition(gtk.WIN_POS_CENTER)
 
 	mainBox, err := gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 14)
@@ -82,7 +88,13 @@ func Start(onTextChanged func(text string), onCommit func(text string), onHide f
 	}
 	mainBox.PackStart(candidateBox, true, true, 0)
 
-	tipsLabel, err := gtk.LabelNew("Tab: Apply & predict next  |  ↑↓: Cycle candidates  |  Enter: Paste  |  Esc: Close")
+	sentenceBox, err := gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 6)
+	if err != nil {
+		return nil, err
+	}
+	mainBox.PackStart(sentenceBox, false, false, 0)
+
+	tipsLabel, err := gtk.LabelNew("Tab: Apply word  |  ↑↓: Cycle words  |  Shift+↑↓: Cycle sentences  |  Shift+Tab: Apply sentence  |  Enter: Paste")
 	if err != nil {
 		return nil, err
 	}
@@ -95,6 +107,7 @@ func Start(onTextChanged func(text string), onCommit func(text string), onHide f
 		window:        win,
 		entry:         entry,
 		candidateBox:  candidateBox,
+		sentenceBox:   sentenceBox,
 		OnTextChanged: onTextChanged,
 		OnCommit:      onCommit,
 		OnHide:        onHide,
@@ -111,6 +124,45 @@ func Start(onTextChanged func(text string), onCommit func(text string), onHide f
 		candidateBox.PackStart(slot.box, false, false, 0)
 	}
 
+	// Pre-allocate sentence slots
+	for i := 0; i < 3; i++ {
+		sBox, err := gtk.EventBoxNew()
+		if err != nil {
+			return nil, err
+		}
+		sBox.SetCanFocus(false)
+
+		sLabel, err := gtk.LabelNew("")
+		if err != nil {
+			return nil, err
+		}
+		sLabel.SetCanFocus(false)
+		sLabel.SetHAlign(gtk.ALIGN_START)
+		sLabel.SetMarginStart(10)
+		sLabel.SetMarginEnd(10)
+		sLabel.SetMarginTop(6)
+		sLabel.SetMarginBottom(6)
+
+		ctx, err := sLabel.GetStyleContext()
+		if err == nil {
+			ctx.AddClass("sentence-label")
+		}
+
+		sBox.Add(sLabel)
+		sentenceBox.PackStart(sBox, false, false, 0)
+
+		// Click handler for sentence box
+		idx := i
+		sBox.Connect("button-press-event", func() bool {
+			controller.applySentence(idx)
+			return true
+		})
+
+		controller.sentenceBoxes[i] = sBox
+		controller.sentenceLabels[i] = sLabel
+		sBox.Hide()
+	}
+
 	applyCSS()
 
 	// "changed" signal fires automatically when entry.SetText is called,
@@ -124,10 +176,11 @@ func Start(onTextChanged func(text string), onCommit func(text string), onHide f
 			controller.OnTextChanged(text)
 		}
 	})
-
 	win.Connect("key-press-event", func(w *gtk.Window, event *gdk.Event) bool {
 		keyEvent := gdk.EventKeyNewFromEvent(event)
 		keyval := keyEvent.KeyVal()
+		state := keyEvent.State()
+		isShift := (state & uint(gdk.SHIFT_MASK)) != 0
 
 		switch keyval {
 		case gdk.KEY_Escape:
@@ -153,53 +206,86 @@ func Start(onTextChanged func(text string), onCommit func(text string), onHide f
 			return true
 
 		case gdk.KEY_Tab:
-			controller.mu.Lock()
-			idx := controller.selectedIndex
-			if idx < 0 && len(controller.candidates) > 0 {
-				idx = 0
-			}
-			controller.mu.Unlock()
-			if idx >= 0 && idx < len(controller.candidates) {
-				controller.applySuggestion(idx)
+			if isShift {
+				controller.mu.Lock()
+				idx := controller.selectedSentenceIndex
+				if idx < 0 && len(controller.sentences) > 0 {
+					idx = 0
+				}
+				controller.mu.Unlock()
+				if idx >= 0 && idx < len(controller.sentences) {
+					controller.applySentence(idx)
+				}
+			} else {
+				controller.mu.Lock()
+				idx := controller.selectedIndex
+				if idx < 0 && len(controller.candidates) > 0 {
+					idx = 0
+				}
+				controller.mu.Unlock()
+				if idx >= 0 && idx < len(controller.candidates) {
+					controller.applySuggestion(idx)
+				}
 			}
 			return true
 
 		case gdk.KEY_ISO_Left_Tab:
 			controller.mu.Lock()
-			if len(controller.candidates) > 0 {
-				controller.selectedIndex--
-				if controller.selectedIndex < 0 {
-					controller.selectedIndex = len(controller.candidates) - 1
-				}
-				idx := controller.selectedIndex
-				controller.mu.Unlock()
-				controller.applySuggestion(idx)
-			} else {
-				controller.mu.Unlock()
+			idx := controller.selectedSentenceIndex
+			if idx < 0 && len(controller.sentences) > 0 {
+				idx = 0
+			}
+			controller.mu.Unlock()
+			if idx >= 0 && idx < len(controller.sentences) {
+				controller.applySentence(idx)
 			}
 			return true
 
 		case gdk.KEY_Down:
-			if len(controller.candidates) > 0 {
-				controller.mu.Lock()
-				controller.selectedIndex++
-				if controller.selectedIndex >= len(controller.candidates) {
-					controller.selectedIndex = 0
+			if isShift {
+				if len(controller.sentences) > 0 {
+					controller.mu.Lock()
+					controller.selectedSentenceIndex++
+					if controller.selectedSentenceIndex >= len(controller.sentences) {
+						controller.selectedSentenceIndex = 0
+					}
+					controller.mu.Unlock()
+					controller.renderSentences()
 				}
-				controller.mu.Unlock()
-				controller.renderCandidates()
+			} else {
+				if len(controller.candidates) > 0 {
+					controller.mu.Lock()
+					controller.selectedIndex++
+					if controller.selectedIndex >= len(controller.candidates) {
+						controller.selectedIndex = 0
+					}
+					controller.mu.Unlock()
+					controller.renderCandidates()
+				}
 			}
 			return true
 
 		case gdk.KEY_Up:
-			if len(controller.candidates) > 0 {
-				controller.mu.Lock()
-				controller.selectedIndex--
-				if controller.selectedIndex < 0 {
-					controller.selectedIndex = len(controller.candidates) - 1
+			if isShift {
+				if len(controller.sentences) > 0 {
+					controller.mu.Lock()
+					controller.selectedSentenceIndex--
+					if controller.selectedSentenceIndex < 0 {
+						controller.selectedSentenceIndex = len(controller.sentences) - 1
+					}
+					controller.mu.Unlock()
+					controller.renderSentences()
 				}
-				controller.mu.Unlock()
-				controller.renderCandidates()
+			} else {
+				if len(controller.candidates) > 0 {
+					controller.mu.Lock()
+					controller.selectedIndex--
+					if controller.selectedIndex < 0 {
+						controller.selectedIndex = len(controller.candidates) - 1
+					}
+					controller.mu.Unlock()
+					controller.renderCandidates()
+				}
 			}
 			return true
 		}
@@ -305,6 +391,20 @@ func applyCSS() {
 			border: 1px solid #ff007f;
 			font-weight: bold;
 		}
+		.sentence-label {
+			font-size: 18px;
+			color: #a3a3c2;
+			background-color: #1e1e2f;
+			padding: 8px 16px;
+			border-radius: 6px;
+			border: 1px solid #2e2e4a;
+		}
+		.sentence-label.selected {
+			background-color: #00f0ff;
+			color: #000000;
+			border: 1px solid #00f0ff;
+			font-weight: bold;
+		}
 	`
 
 	err = cssProvider.LoadFromData(css)
@@ -333,8 +433,11 @@ func (c *UIController) Show() {
 		c.mu.Lock()
 		c.candidates = nil
 		c.selectedIndex = -1
+		c.sentences = nil
+		c.selectedSentenceIndex = -1
 		c.mu.Unlock()
 		c.renderCandidates()
+		c.renderSentences()
 	})
 }
 
@@ -422,6 +525,74 @@ func (c *UIController) applySuggestion(index int) {
 			newText = strings.Join(words, " ") + " "
 		}
 		// SetText fires the "changed" signal → onTextChanged → UpdateCandidates.
+		c.entry.SetText(newText)
+		c.entry.SetPosition(-1)
+	})
+}
+
+func (c *UIController) UpdateSentences(sentences []string) {
+	c.mu.Lock()
+	c.sentences = sentences
+	c.selectedSentenceIndex = -1
+	c.mu.Unlock()
+
+	glib.IdleAdd(func() {
+		c.renderSentences()
+	})
+}
+
+func (c *UIController) renderSentences() {
+	c.mu.Lock()
+	sentences := make([]string, len(c.sentences))
+	copy(sentences, c.sentences)
+	selectedIdx := c.selectedSentenceIndex
+	c.mu.Unlock()
+
+	if len(sentences) > 0 {
+		c.sentenceBox.Show()
+	} else {
+		c.sentenceBox.Hide()
+	}
+
+	for i := 0; i < 3; i++ {
+		slotBox := c.sentenceBoxes[i]
+		slotLabel := c.sentenceLabels[i]
+
+		if i < len(sentences) {
+			slotLabel.SetText(sentences[i])
+
+			ctx, err := slotLabel.GetStyleContext()
+			if err == nil {
+				if i == selectedIdx {
+					ctx.AddClass("selected")
+				} else {
+					ctx.RemoveClass("selected")
+				}
+			}
+			slotBox.ShowAll()
+		} else {
+			slotBox.Hide()
+		}
+	}
+}
+
+func (c *UIController) applySentence(index int) {
+	c.mu.Lock()
+	if index < 0 || index >= len(c.sentences) {
+		c.mu.Unlock()
+		return
+	}
+	sentence := c.sentences[index]
+	c.mu.Unlock()
+
+	glib.IdleAdd(func() {
+		text, _ := c.entry.GetText()
+		var newText string
+		if strings.HasSuffix(text, " ") || text == "" {
+			newText = text + sentence + " "
+		} else {
+			newText = text + " " + sentence + " "
+		}
 		c.entry.SetText(newText)
 		c.entry.SetPosition(-1)
 	})

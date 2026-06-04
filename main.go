@@ -9,6 +9,9 @@ import (
 	"syscall"
 	"time"
 
+	"sync"
+
+	"github.com/gotk3/gotk3/glib"
 	"zen-typo/pkg/config"
 	"zen-typo/pkg/db"
 	"zen-typo/pkg/hotkey"
@@ -148,8 +151,42 @@ func hydrateFromDB() {
 	}
 }
 
+var (
+	sentenceSeq   uint64
+	sentenceSeqMu sync.Mutex
+)
+
 func onTextChanged(text string) {
 	words := strings.Fields(text)
+
+	// Fetch sentences if enabled and there are words in context
+	if cfg.EnableSentenceSuggestions && len(words) > 0 {
+		sentenceSeqMu.Lock()
+		sentenceSeq++
+		seq := sentenceSeq
+		sentenceSeqMu.Unlock()
+
+		go func(w []string, currentSeq uint64) {
+			sugs := predictor.PredictSentences(w)
+
+			// Limit suggestions to config.MaxSentenceSuggestions
+			if len(sugs) > cfg.MaxSentenceSuggestions {
+				sugs = sugs[:cfg.MaxSentenceSuggestions]
+			}
+
+			sentenceSeqMu.Lock()
+			isLatest := currentSeq == sentenceSeq
+			sentenceSeqMu.Unlock()
+
+			if isLatest {
+				glib.IdleAdd(func() {
+					uiCtrl.UpdateSentences(sugs)
+				})
+			}
+		}(words, seq)
+	} else {
+		uiCtrl.UpdateSentences(nil)
+	}
 
 	// Empty input → show sentence starters
 	if len(text) == 0 {

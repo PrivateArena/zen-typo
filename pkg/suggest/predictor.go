@@ -7,6 +7,9 @@ type Predictor interface {
 	// last 0–N words of context (same semantics as BigramEngine).
 	PredictNextContext(words []string) []string
 
+	// PredictSentences returns up to 3 full-sentence continuation candidates.
+	PredictSentences(words []string) []string
+
 	// Starters returns common sentence-opening words shown on empty input.
 	Starters() []string
 
