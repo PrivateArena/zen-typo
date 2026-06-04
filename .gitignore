@@ -58,3 +58,4 @@ scratch/
 *.db
 *.db-shm
 *.db-wal
+model/
