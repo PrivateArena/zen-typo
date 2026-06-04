@@ -1,82 +1,224 @@
-# Zen-Typo: Architectural Overview
+# Zen-Typo
 
-`zen-typo` is a high-performance, system-wide autocomplete and sentence-prediction daemon for Linux X11 environments. It operates completely out-of-band from heavy input method frameworks (such as IBus or Fcitx), providing a lightweight, low-latency autocomplete experience with a floating visual overlay.
+A system-wide autocomplete and next-word prediction daemon for **Linux X11**.
+Operates completely out-of-band from IBus/Fcitx — no input-method framework required.
+100 % offline, zero cloud dependency, sub-millisecond suggestion latency.
 
 ---
 
-## High-Level Architecture & Data Flow
+## Quick Start
 
-The following diagram illustrates how user key events flow from the global keyboard monitor down to the suggestion engine, database persistence, overlay rendering, and text injection:
+```bash
+# Build (standard, no ONNX)
+go build -o zen-typo .
 
-```mermaid
-graph TD
-    User([User Types]) -->|Global Key Events| HK[pkg/hotkey: Listener]
-    HK -->|Double-Ctrl Trigger| UI[pkg/ui: GTK Overlay]
-    UI -->|Active Input Changes| SE[pkg/suggest: Engine]
-    
-    subgraph Suggestion Pipeline
-        SE -->|1. Typo Correction| SS[SymSpell Lookup & Weighted Edit Distance]
-        SE -->|2. Prefix Completion| PC[Prefix Matcher]
-        SE -->|3. Next-Word Prediction| NG[Bigram N-Gram Predictor]
-        
-        Lex[(pkg/suggest: Common Vocabulary)] -->|Pre-hydrated Frequencies| SE
-    end
-    
-    subgraph Habit Persistence
-        DB[(pkg/db: SQLite WAL)] <-->|Async Load & Increment| SE
-    end
-    
-    UI -->|Selected Word / Commit| INJ[pkg/inject: Clipboard & XTest]
-    INJ -->|Simulated Ctrl+V| ActiveApp([Target Application])
+# Optional: build the corpus database (~100 K bigrams from Project Gutenberg)
+go run ./tools/setup_ngram_db/
+
+# Optional: download DistilGPT-2 ONNX model (~82 MB) for sentence completions
+go run ./tools/setup_onnx/
+
+# Run
+./zen-typo
+```
+
+**Trigger**: press `Ctrl` twice in quick succession (< 300 ms) from any application.
+
+### Keyboard Controls (overlay)
+
+| Key | Action |
+|---|---|
+| `Tab` | Apply first word candidate |
+| `↑` / `↓` | Cycle word candidates |
+| `Shift+↑` / `Shift+↓` | Cycle sentence candidates |
+| `Shift+Tab` | Apply highlighted sentence candidate |
+| `Enter` | Paste current text as-is |
+| `Escape` | Close overlay |
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  User types anywhere (X11)                                      │
+└────────────────────┬────────────────────────────────────────────┘
+                     │ XRecord (kernel fd, 0 % CPU idle)
+                     ▼
+             pkg/hotkey · Listener
+               Double-Ctrl (<300 ms)
+                     │
+                     ▼
+             pkg/ui · GTK-3 Overlay ─────────────► pkg/inject · XTest Ctrl+V
+               7 pre-alloc slots                     ▲
+               3 sentence slots                      │ commit text
+                     │                               │
+          ┌──────────┴──────────┐                    │
+          │ onTextChanged       │ onCommit            │
+          ▼                     ▼                    │
+   pkg/suggest                 habit.db (WAL)        │
+   ┌──────────────┐  word/bigram learning ──────────►│
+   │ Engine       │  (goroutine, non-blocking)
+   │  SymSpell    │
+   │  QWERTY dist │
+   │  Prefix scan │
+   └──────┬───────┘
+          │ Predictor interface
+   ┌──────┴────────────────────────────────┐
+   │  builtin   │  ngram (default)  │ onnx │
+   │  BigramEng │  SQLitePredictor  │ GPT2 │
+   │  (seeded)  │  bigrams+trigrams │ ONNX │
+   └────────────┴───────────────────┴──────┘
+                         ▲
+                    ngrams.db (corpus)
+                    habit.db  (personal)
 ```
 
 ---
 
 ## Core Components
 
-### 1. Global Hotkey Listener (`pkg/hotkey`)
-*   **Purpose**: Monitors key presses globally under X11 to capture key combos without hogging active focus.
-*   **Mechanism**: Uses `XRecord` (with CGO wrapper) to establish an asynchronous recording context. 
-*   **Triggers**: Tracks timings between consecutive `Control` key releases. A delta below `250ms` fires the double-Ctrl callback, bringing the overlay to the front.
+### `pkg/hotkey` — Global Key Listener
+- Uses **XRecord** via a CGo wrapper over `libX11` + `libXtst`.
+- Opens two X11 connections: one for `XRecordCreateContext`, one blocking on
+  `XRecordEnableContext` (parks on the kernel socket — true 0 % CPU idle).
+- Fires the double-Ctrl callback when two `Control_L` presses arrive within **300 ms**
+  and no other key is pressed between them.
 
-### 2. GTK-3 Overlay UI (`pkg/ui`)
-*   **Purpose**: Renders the input text area and word candidates with premium aesthetics.
-*   **Aesthetics & Sizing**: Uses customized, high-contrast dark CSS (explicit white `#ffffff` input background with black `#000000` text) to ensure legibility across all custom Linux/GTK system themes. 
-*   **Performance**: Utilizes `gotk3`'s native GTK event-driven loop. When hidden, it uses **0% CPU**, consuming no active loop cycles.
-*   **Signals**: Integrated with Escape (close), Enter (commit highlighted candidate), Tab (apply first candidate), and Left/Right arrow keys (candidate cycle).
+### `pkg/ui` — GTK-3 Overlay
+- **Window type**: `POPUP_MENU` — bypasses window manager decoration and focus policies.
+- **Pre-allocated widget slots**: 7 candidate `EventBox`/`Label` pairs and 3 sentence
+  rows are created once at startup and **never destroyed**. Visibility toggling via
+  `Show()`/`Hide()` on the slots replaces the previous `Add()`/`Remove()` pattern that
+  caused focus-stealing on every suggestion update.
+- **Focus strategy**: `PresentWithTime(GDK_CURRENT_TIME)` + direct X11
+  `SetInputFocus` after `gtk.MainIterationDo` on every `Show()` to defeat X11's
+  focus-prevention policy.
+- **Thread safety**: all GTK mutations are marshalled through `glib.IdleAdd`.
 
-### 3. Suggestion Engine (`pkg/suggest`)
-*   **Components**:
-    *   **Common Vocabulary (`common_words.go`)**: Hydrated with the top 800+ English words mapped to their natural occurrences to bootstrap completions instantly.
-    *   **SymSpell Fuzzy spelling**: Utilizes pre-computed deletion dictionaries for sub-millisecond typo matching up to an edit distance of 2.
-    *   **Custom Math Scoring**: Candidates are ranked using a heavy exponential penalty decay base (`1.0 / math.Pow(250.0, editDistance)`) to ensure single-character corrections are never drowned out by double-character modifications of common words.
-    *   **N-Gram Prediction**: A custom bigram dictionary tracking combinations (e.g. "look forward", "how are").
+### `pkg/suggest` — Spelling + Prediction Engine
 
-### 4. Asynchronous Learning Database (`pkg/db`)
-*   **Purpose**: Continuously refines predictions based on the user's personal typing style.
-*   **Backend**: SQLite database running in Write-Ahead Logging (`WAL`) mode with `NORMAL` synchronous flags.
-*   **Asynchronous Updates**: Learning increments (word counts and bigram transitions) are executed in background goroutines, guaranteeing that writing to disk never blocks GTK UI render frames.
+#### Spell / Completion Engine (`engine.go`)
+- **SymSpell** deletion-dictionary algorithm: pre-computed deletions at add-time,
+  `O(1)` lookup per candidate.
+- **QWERTY-aware edit distance**: substitution cost for keyboard-adjacent keys is
+  `0.5` (half penalty) instead of `1.0`.
+- **Exponential distance decay**: candidate score = `freq × (1 / 250^editDist)` —
+  a distance-2 correction is 62 500× weaker than an exact match.
+- **Prefix completion**: linear penalty `freq / (1 + suffix_length)`, boosted by
+  `+1e9` to always rank above typo corrections of the same word.
 
-### 5. Paste Injector (`pkg/inject`)
-*   **Purpose**: Pastes the finalized string back into the user's active editor.
-*   **Mechanism**: Copies the committed text directly to the global clipboard (`xclip` wrapper) and triggers `Ctrl+V` key simulation using the `XTest` native extension.
+#### Predictor Interface (`predictor.go`)
+Three interchangeable backends selected via `config.json`:
+
+| Engine | Key | Notes |
+|---|---|---|
+| `BuiltinPredictor` | `"builtin"` | In-memory seed bigrams, no files needed |
+| `SQLitePredictor` | `"ngram"` | Gutenberg corpus, bigrams + trigrams, prepared stmts |
+| `OnnxPredictor` | `"onnx"` | DistilGPT-2, build tag `onnx`, sentence completions |
+
+`SQLitePredictor` query priority: **trigram ×3** → **bigram ×1** → builtin fallback
+(gap-fill only). Gracefully degrades to builtin when `ngrams.db` is absent.
+
+`OnnxPredictor` requires:
+```bash
+go build -tags onnx .
+# and libonnxruntime.so alongside the binary
+```
+
+### `pkg/db` — Habit Learning Database (`habit.db`)
+- SQLite in **WAL** mode with `PRAGMA synchronous = NORMAL`.
+- Stores per-word frequencies and user bigram transitions.
+- All writes (`IncrementWord`, `IncrementBigram`) run in background goroutines —
+  disk I/O never blocks a GTK frame.
+- Loaded at startup into the spelling `Engine` (`UpdateUserFrequency`) and into
+  the active `Predictor` (`AddUserTransition`) for personalised ranking.
+
+### `pkg/inject` — Text Injection (`paste.go`)
+1. Copies committed text to the system clipboard (`atotto/clipboard`).
+2. Waits 150 ms for the previously-active window to regain focus.
+3. Simulates `Ctrl+V` via **XTest** (`FakeInput` key events) to paste into the
+   target application.
+
+### `pkg/config` — Configuration (`config.json`)
+Auto-created next to the binary on first run. Key fields:
+
+```json
+{
+  "engine": "ngram",
+  "ngram_db_path": "ngrams.db",
+  "onnx_model_path": "model/distilgpt2.onnx",
+  "onnx_vocab_path": "model/vocab.json",
+  "max_suggestions": 5,
+  "enable_sentence_suggestions": true,
+  "max_sentence_suggestions": 3
+}
+```
+
+Path resolution order: absolute path → relative to executable directory (portable mode).
 
 ---
 
-## Portability Configuration Model
+## Suggestion Pipeline (per keystroke)
 
-Adhering to multi-path portable standards, database location resolution checks paths in the following priority order:
+```
+onTextChanged(text)
+ ├─ text == ""            → Predictor.Starters()
+ ├─ text ends with " "   → Predictor.PredictNextContext(words)
+ └─ mid-word fragment
+     ├─ Engine.Suggest(lastWord)          [SymSpell + prefix]
+     ├─ Predictor.PredictNextContext      [prior context, prefix-filtered]
+     └─ merge (context first, then spell) → UpdateCandidates()
 
-1.  **Binary Directory**: If `portable.dat` or `habit.db` exists in the folder containing the binary, the application locks into **Portable Mode**, reading/writing data strictly alongside the executable.
-2.  **Current Working Directory (CWD)**: Allows running project-specific instances from local workspaces.
-3.  **User Config Directory**: Falls back to the standard Linux configuration path (`~/.config/zen-typo/habit.db`).
+ └─ if EnableSentenceSuggestions && words > 0
+       goroutine → Predictor.PredictSentences(words)
+                 → glib.IdleAdd → UpdateSentences()   [seq-guarded]
+```
 
-The exact database file path chosen is always logged to standard error on start.
+---
+
+## Portability & Data Locations
+
+Resolution order for `habit.db` (and all data files):
+
+1. **Portable mode**: `portable.dat` or `habit.db` found next to the binary →
+   all files locked to that directory.
+2. **CWD**: binary not portable, checks working directory.
+3. **User config dir**: `~/.config/zen-typo/habit.db`.
+
+`config.json` always resolves to the executable directory.
+
+---
+
+## Tools
+
+| Tool | Purpose |
+|---|---|
+| `tools/setup_ngram_db` | Downloads Project Gutenberg books, builds `ngrams.db` with 100 K+ bigrams |
+| `tools/setup_onnx` | Downloads `libonnxruntime.so` v1.25.0 + DistilGPT-2 ONNX model |
+
+---
+
+## Dependencies
+
+| Package | Role |
+|---|---|
+| `gotk3/gotk3` | GTK-3 UI (event-driven, 0 % CPU idle) |
+| `jezek/xgb` + `xgbutil` | X11 protocol (XTest key injection, focus management) |
+| `mattn/go-sqlite3` | SQLite driver (habit.db + ngrams.db) |
+| `atotto/clipboard` | System clipboard write |
+| `yalue/onnxruntime_go` | ONNX Runtime binding (build tag `onnx` only) |
+| `libX11` + `libXtst` | XRecord (CGo, hotkey listener) |
 
 ---
 
 ## Architectural Rationale
 
-*   **No Cloud Dependency**: Native spellchecking and next-word inference happen purely on-device, keeping user input strictly private.
-*   **Memory Efficiency**: By caching frequencies in a memory map and updating the database asynchronously, memory remains below `40MB` and query latency remains sub-millisecond.
-*   **Theme Independence**: Fusing both the background and color CSS properties for inputs bypasses the common Linux problem where active system GTK themes override overlay text visibility.
+| Decision | Why |
+|---|---|
+| XRecord over `xdotool`/evdev polling | Kernel-fd blocking = true 0 % CPU idle |
+| Pre-allocated GTK slots (never `Destroy`) | Eliminates focus-theft caused by widget lifecycle |
+| `Predictor` interface (builtin/ngram/onnx) | Swappable backends without touching UI or learning code |
+| SQLite WAL + async goroutines | Disk writes never add latency to suggestion rendering |
+| Build tag `onnx` gating CGo | Standard `go build .` works with zero ONNX runtime on the host |
+| Exponential decay base 250 | Distance-1 corrections rank 250× below exact matches — typo fixes never hijack prefix completions |
