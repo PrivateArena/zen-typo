@@ -60,3 +60,4 @@ scratch/
 *.db-wal
 model/
 *.onnx
+libonnxruntime.so
