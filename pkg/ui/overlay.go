@@ -22,7 +22,7 @@ type UIController struct {
 	currentText   string
 
 	OnTextChanged func(text string)
-	OnCommit      func(text string)
+	OnCommit      func(text string, acceptedSuggestion bool)
 	OnHide        func()
 
 	mu sync.Mutex
@@ -30,7 +30,7 @@ type UIController struct {
 
 var controller *UIController
 
-func Start(onTextChanged func(text string), onCommit func(text string), onHide func()) (*UIController, error) {
+func Start(onTextChanged func(text string), onCommit func(text string, acceptedSuggestion bool), onHide func()) (*UIController, error) {
 	runtime.LockOSThread()
 
 	gtk.Init(nil)
@@ -45,18 +45,18 @@ func Start(onTextChanged func(text string), onCommit func(text string), onHide f
 	win.SetKeepAbove(true)
 	win.SetSkipPagerHint(true)
 	win.SetSkipTaskbarHint(true)
-	win.SetDefaultSize(800, 240)
+	win.SetDefaultSize(650, 110)
 	win.SetPosition(gtk.WIN_POS_CENTER)
 
 	// Box layout with more spacing
-	mainBox, err := gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 14)
+	mainBox, err := gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 6)
 	if err != nil {
 		return nil, err
 	}
-	mainBox.SetMarginStart(25)
-	mainBox.SetMarginEnd(25)
-	mainBox.SetMarginTop(20)
-	mainBox.SetMarginBottom(20)
+	mainBox.SetMarginStart(15)
+	mainBox.SetMarginEnd(15)
+	mainBox.SetMarginTop(10)
+	mainBox.SetMarginBottom(10)
 	win.Add(mainBox)
 
 	// Text input field
@@ -75,7 +75,7 @@ func Start(onTextChanged func(text string), onCommit func(text string), onHide f
 	mainBox.PackStart(candidateBox, true, true, 0)
 
 	// Status/tips label
-	tipsLabel, err := gtk.LabelNew("Tab: Autocomplete first | Esc: Close | Enter: Paste | Up/Down: Select candidate")
+	tipsLabel, err := gtk.LabelNew("Tab / Up/Down: Cycle | Esc: Close | Enter: Commit")
 	if err != nil {
 		return nil, err
 	}
@@ -121,6 +121,7 @@ func Start(onTextChanged func(text string), onCommit func(text string), onHide f
 
 		case gdk.KEY_Return, gdk.KEY_KP_Enter:
 			text, _ := entry.GetText()
+			acceptedSuggestion := false
 			if controller.selectedIndex >= 0 && controller.selectedIndex < len(controller.candidates) {
 				// Commit the selected candidate instead of raw text if one is highlighted
 				words := strings.Fields(text)
@@ -128,37 +129,32 @@ func Start(onTextChanged func(text string), onCommit func(text string), onHide f
 					words[len(words)-1] = controller.candidates[controller.selectedIndex]
 					text = strings.Join(words, " ") + " "
 				}
+				acceptedSuggestion = true
 			}
 			if controller.OnCommit != nil {
-				controller.OnCommit(text)
+				controller.OnCommit(text, acceptedSuggestion)
 			}
 			controller.Hide()
 			return true
 
-		case gdk.KEY_Tab:
-			if len(controller.candidates) > 0 {
-				controller.applySuggestion(0)
-			}
-			return true
-
-		case gdk.KEY_Left:
+		case gdk.KEY_Tab, gdk.KEY_Down:
 			if len(controller.candidates) > 0 {
 				controller.mu.Lock()
-				controller.selectedIndex--
-				if controller.selectedIndex < 0 {
-					controller.selectedIndex = len(controller.candidates) - 1
+				controller.selectedIndex++
+				if controller.selectedIndex >= len(controller.candidates) {
+					controller.selectedIndex = 0
 				}
 				controller.mu.Unlock()
 				controller.renderCandidates()
 			}
 			return true
 
-		case gdk.KEY_Right:
+		case gdk.KEY_ISO_Left_Tab, gdk.KEY_Up:
 			if len(controller.candidates) > 0 {
 				controller.mu.Lock()
-				controller.selectedIndex++
-				if controller.selectedIndex >= len(controller.candidates) {
-					controller.selectedIndex = 0
+				controller.selectedIndex--
+				if controller.selectedIndex < 0 {
+					controller.selectedIndex = len(controller.candidates) - 1
 				}
 				controller.mu.Unlock()
 				controller.renderCandidates()
@@ -202,8 +198,8 @@ func applyCSS() {
 		entry, entry text {
 			background-color: #ffffff;
 			color: #000000;
-			font-size: 26px;
-			padding: 10px 16px;
+			font-size: 18px;
+			padding: 6px 12px;
 			caret-color: #ff007f;
 		}
 		entry {
@@ -214,15 +210,15 @@ func applyCSS() {
 			border: 2px solid #00f0ff;
 		}
 		#tips-label {
-			font-size: 14px;
+			font-size: 10px;
 			color: #7b7b99;
-			margin-top: 8px;
+			margin-top: 4px;
 		}
 		.candidate-label {
-			font-size: 20px;
+			font-size: 14px;
 			color: #cfcfdb;
 			background-color: #21253b;
-			padding: 10px 20px;
+			padding: 5px 12px;
 			border-radius: 6px;
 			border: 1px solid #333957;
 		}
@@ -254,9 +250,20 @@ func (c *UIController) Show() {
 
 	glib.IdleAdd(func() {
 		c.window.ShowAll()
-		c.entry.SetText("")
+
+		// Read primary selection to pre-populate text
+		initialText := ""
+		if clipboard, err := gtk.ClipboardGet(gdk.SELECTION_PRIMARY); err == nil {
+			if text, err := clipboard.WaitForText(); err == nil {
+				initialText = strings.TrimSpace(text)
+			}
+		}
+
+		c.entry.SetText(initialText)
 		c.window.Present()
 		c.entry.GrabFocus()
+		c.entry.SetPosition(-1) // Move cursor to the end of initialText
+
 		c.mu.Lock()
 		c.candidates = nil
 		c.selectedIndex = -1
@@ -290,11 +297,7 @@ func (c *UIController) GetText() string {
 func (c *UIController) UpdateCandidates(candidates []string) {
 	c.mu.Lock()
 	c.candidates = candidates
-	if len(candidates) > 0 {
-		c.selectedIndex = 0
-	} else {
-		c.selectedIndex = -1
-	}
+	c.selectedIndex = -1
 	c.mu.Unlock()
 
 	glib.IdleAdd(func() {

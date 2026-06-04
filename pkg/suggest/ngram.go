@@ -1,6 +1,7 @@
 package suggest
 
 import (
+	"sort"
 	"strings"
 	"sync"
 )
@@ -22,28 +23,24 @@ func NewBigramEngine() *BigramEngine {
 
 func (b *BigramEngine) loadCommonBigrams() {
 	common := map[string][]string{
-		"how":    {"are", "about", "do", "to", "many"},
-		"what":   {"is", "are", "do", "about", "if", "you"},
-		"thank":  {"you", "fully", "s"},
-		"you":    {"are", "can", "will", "do", "have", "know", "think"},
-		"i":      {"would", "am", "think", "want", "have", "can", "know", "will"},
-		"it":     {"is", "was", "would", "seems", "has", "can"},
-		"this":   {"is", "was", "will", "has", "means", "way"},
-		"that":   {"is", "was", "you", "they", "we", "would"},
-		"we":     {"can", "will", "are", "have", "need", "do", "should"},
-		"they":   {"are", "will", "can", "have", "do", "need"},
-		"nice":   {"to", "meeting", "job"},
-		"good":   {"morning", "afternoon", "evening", "job", "idea", "luck"},
-		"please": {"let", "find", "send", "check", "help", "do"},
-		"would":  {"be", "like", "you", "love", "have"},
-		"could":  {"you", "be", "have", "not", "do"},
-		"should": {"be", "we", "have", "you", "do"},
-		"let":    {"me", "us", "go", "him", "her"},
-		"look":   {"forward", "at", "for", "like", "up"},
-		"feel":   {"free", "like", "good", "better"},
-		"do":     {"you", "not", "it", "have", "so"},
-		"dont":   {"know", "think", "have", "want", "like"},
-		"can":    {"you", "be", "do", "have", "not", "see"},
+		"nice":    {"to", "meeting", "job"},
+		"to":      {"meet", "be", "do", "hearing", "see", "the", "you"},
+		"meet":    {"you"},
+		"thank":   {"you"},
+		"you":     {"are", "can", "will", "do", "have", "know", "think", "very"},
+		"very":    {"much"},
+		"look":    {"forward", "at", "for", "like", "up"},
+		"forward": {"to"},
+		"how":     {"are", "about", "do", "to", "many"},
+		"are":     {"you"},
+		"let":     {"me", "us", "go", "him", "her"},
+		"me":      {"know"},
+		"know":    {"if"},
+		"would":   {"be", "like", "you", "love", "have"},
+		"like":    {"to"},
+		"dont":    {"know", "think", "have", "want", "like"},
+		"feel":    {"free", "like", "good", "better"},
+		"free":    {"to"},
 	}
 
 	for word, nexts := range common {
@@ -78,50 +75,69 @@ func (b *BigramEngine) PredictNext(lastWord string) []string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	candidates := make(map[string]int64)
+	getTopNext := func(w string) []bigramEntry {
+		cands := make(map[string]int64)
+		if nexts, exists := b.transitions[w]; exists {
+			for next, weight := range nexts {
+				cands[next] = weight
+			}
+		}
+		if nexts, exists := b.userTransitions[w]; exists {
+			for next, weight := range nexts {
+				cands[next] += weight * 10
+			}
+		}
+		var sorted []bigramEntry
+		for next, weight := range cands {
+			sorted = append(sorted, bigramEntry{word: next, weight: weight})
+		}
+		sort.Slice(sorted, func(i, j int) bool {
+			return sorted[i].weight > sorted[j].weight
+		})
+		return sorted
+	}
 
-	// Add built-in bigrams
-	if nexts, exists := b.transitions[lastWord]; exists {
-		for next, weight := range nexts {
-			candidates[next] = weight
+	primary := getTopNext(lastWord)
+	if len(primary) == 0 {
+		return nil
+	}
+
+	var suggestions []string
+	seen := make(map[string]bool)
+
+	addSuggestion := func(s string) {
+		if !seen[s] && len(suggestions) < 5 {
+			seen[s] = true
+			suggestions = append(suggestions, s)
 		}
 	}
 
-	// Add user-learned transitions with higher weight multiplier
-	if nexts, exists := b.userTransitions[lastWord]; exists {
-		for next, weight := range nexts {
-			candidates[next] += weight * 10
+	for _, p := range primary {
+		addSuggestion(p.word)
+
+		secondLevel := getTopNext(p.word)
+		if len(secondLevel) > 0 {
+			next2 := secondLevel[0].word
+			phrase2 := p.word + " " + next2
+			addSuggestion(phrase2)
+
+			thirdLevel := getTopNext(next2)
+			if len(thirdLevel) > 0 {
+				next3 := thirdLevel[0].word
+				phrase3 := phrase2 + " " + next3
+				addSuggestion(phrase3)
+			}
 		}
 	}
 
-	// Sort by weight
-	var sorted []bigramEntry
-	for next, weight := range candidates {
-		sorted = append(sorted, bigramEntry{word: next, weight: weight})
+	for _, p := range primary {
+		addSuggestion(p.word)
 	}
 
-	sortSlice(sorted)
-
-	var result []string
-	for i := 0; i < len(sorted) && i < 5; i++ {
-		result = append(result, sorted[i].word)
-	}
-
-	return result
+	return suggestions
 }
 
 type bigramEntry struct {
 	word   string
 	weight int64
-}
-
-func sortSlice(slice []bigramEntry) {
-	// Standard bubble-sort or simple selection sort to keep it dependency-free and easy
-	for i := 0; i < len(slice); i++ {
-		for j := i + 1; j < len(slice); j++ {
-			if slice[i].weight < slice[j].weight {
-				slice[i], slice[j] = slice[j], slice[i]
-			}
-		}
-	}
 }

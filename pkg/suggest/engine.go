@@ -172,12 +172,13 @@ func (e *Engine) Suggest(input string) []string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	// 1. Exact match search
-	if info, exists := e.dictionary[input]; exists {
-		return []string{info.Word}
-	}
-
 	candidatesMap := make(map[string]float64)
+
+	// 1. Exact match priority seeding
+	if info, exists := e.dictionary[input]; exists {
+		totalFreq := info.Frequency + info.UserFreq*5
+		candidatesMap[input] = float64(totalFreq)
+	}
 
 	// 2. Generate input deletions for SymSpell matching
 	inputDeletes := e.getDeletes(input, e.maxDistance)
@@ -187,13 +188,13 @@ func (e *Engine) Suggest(input string) []string {
 			for _, w := range words {
 				if _, exists := candidatesMap[w]; !exists {
 					dist := e.editDistance(input, w)
-					if dist <= e.maxDistance {
+					if dist <= float64(e.maxDistance) {
 						info := e.dictionary[w]
 						totalFreq := info.Frequency + info.UserFreq*5
 						// Distance penalty multiplier (heavy exponential decay)
 						penalty := 1.0
 						if dist > 0 {
-							penalty = 1.0 / math.Pow(250.0, float64(dist))
+							penalty = 1.0 / math.Pow(250.0, dist)
 						}
 
 						// Calculate candidate score
@@ -239,18 +240,26 @@ func (e *Engine) Suggest(input string) []string {
 	return result
 }
 
-func (e *Engine) editDistance(s1, s2 string) int {
+func (e *Engine) IsValidWord(word string) bool {
+	word = strings.ToLower(word)
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	_, exists := e.dictionary[word]
+	return exists
+}
+
+func (e *Engine) editDistance(s1, s2 string) float64 {
 	r1, r2 := []rune(s1), []rune(s2)
 	len1, len2 := len(r1), len(r2)
 
 	// Create distance matrix
-	matrix := make([][]int, len1+1)
+	matrix := make([][]float64, len1+1)
 	for i := range matrix {
-		matrix[i] = make([]int, len2+1)
-		matrix[i][0] = i
+		matrix[i] = make([]float64, len2+1)
+		matrix[i][0] = float64(i)
 	}
 	for j := 0; j <= len2; j++ {
-		matrix[0][j] = j
+		matrix[0][j] = float64(j)
 	}
 
 	for i := 1; i <= len1; i++ {
@@ -258,14 +267,14 @@ func (e *Engine) editDistance(s1, s2 string) int {
 			if r1[i-1] == r2[j-1] {
 				matrix[i][j] = matrix[i-1][j-1]
 			} else {
-				subCost := 1
+				subCost := 1.0
 				// QWERTY keyboard distance optimization
 				if e.isKeyboardAdjacent(r1[i-1], r2[j-1]) {
-					// We keep cost as 1 but could bias scoring inside the main loop
+					subCost = 0.5
 				}
-				matrix[i][j] = min(
-					matrix[i-1][j]+1,      // Deletion
-					matrix[i][j-1]+1,      // Insertion
+				matrix[i][j] = minFloat(
+					matrix[i-1][j]+1.0,      // Deletion
+					matrix[i][j-1]+1.0,      // Insertion
 					matrix[i-1][j-1]+subCost, // Substitution
 				)
 			}
@@ -286,7 +295,7 @@ func (e *Engine) isKeyboardAdjacent(r1, r2 rune) bool {
 	return dist <= 1.5
 }
 
-func min(a, b, c int) int {
+func minFloat(a, b, c float64) float64 {
 	if a < b && a < c {
 		return a
 	}

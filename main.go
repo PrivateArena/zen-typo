@@ -56,7 +56,7 @@ func main() {
 			log.Println("Double-Ctrl detected while visible! Committing current entry...")
 			text := uiCtrl.GetText()
 			uiCtrl.Hide()
-			onCommit(text)
+			onCommit(text, false)
 		} else {
 			log.Println("Double-Ctrl detected! Showing overlay...")
 			uiCtrl.Show()
@@ -130,13 +130,13 @@ func onTextChanged(text string) {
 	}
 }
 
-func onCommit(text string) {
+func onCommit(text string, acceptedSuggestion bool) {
 	text = strings.TrimSpace(text)
 	if len(text) == 0 {
 		return
 	}
 
-	log.Printf("Committing: %q", text)
+	log.Printf("Committing (acceptedSuggestion=%t): %q", acceptedSuggestion, text)
 
 	// Perform passive habit learning in the background
 	go func() {
@@ -150,8 +150,10 @@ func onCommit(text string) {
 			// Strip standard punctuation marks for word learning
 			wClean := strings.Trim(w, ".,?!;:\"'()[]")
 			if len(wClean) > 0 {
-				suggestEngine.UpdateUserFrequency(wClean, 1)
-				database.IncrementWord(wClean)
+				if acceptedSuggestion || suggestEngine.IsValidWord(wClean) {
+					suggestEngine.UpdateUserFrequency(wClean, 1)
+					database.IncrementWord(wClean)
+				}
 			}
 		}
 
@@ -160,8 +162,10 @@ func onCommit(text string) {
 			w1 := strings.Trim(words[i], ".,?!;:\"'()[]")
 			w2 := strings.Trim(words[i+1], ".,?!;:\"'()[]")
 			if len(w1) > 0 && len(w2) > 0 {
-				bigramEngine.AddUserTransition(w1, w2, 1)
-				database.IncrementBigram(w1, w2)
+				if acceptedSuggestion || (suggestEngine.IsValidWord(w1) && suggestEngine.IsValidWord(w2)) {
+					bigramEngine.AddUserTransition(w1, w2, 1)
+					database.IncrementBigram(w1, w2)
+				}
 			}
 		}
 	}()

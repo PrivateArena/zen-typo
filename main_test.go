@@ -25,12 +25,12 @@ func TestEngineSpellingAndBigrams(t *testing.T) {
 	// Add custom words
 	se.AddWord("typography", 100)
 	se.AddWord("typo", 80)
-	se.AddWord("hello", 200)
+	se.AddWord("hello", 10000)
 
 	// Test spelling correction (Exact)
 	sug1 := se.Suggest("hello")
-	if len(sug1) != 1 || sug1[0] != "hello" {
-		t.Errorf("Expected exact match 'hello', got: %v", sug1)
+	if len(sug1) == 0 || sug1[0] != "hello" {
+		t.Errorf("Expected top exact match 'hello', got: %v", sug1)
 	}
 
 	// Test fuzzy correction (Edit distance 1)
@@ -58,6 +58,22 @@ func TestEngineSpellingAndBigrams(t *testing.T) {
 	nextsBoosted := be.PredictNext("how")
 	if len(nextsBoosted) == 0 || nextsBoosted[0] != "many" {
 		t.Errorf("Expected 'many' to be boosted to top suggestion, got: %v", nextsBoosted)
+	}
+
+	// Test phrase completion chaining
+	phraseCands := be.PredictNext("nice")
+	hasMeet := false
+	hasMeetYou := false
+	for _, p := range phraseCands {
+		if p == "to meet" {
+			hasMeet = true
+		}
+		if p == "to meet you" {
+			hasMeetYou = true
+		}
+	}
+	if !hasMeet || !hasMeetYou {
+		t.Errorf("Expected chained phrase predictions 'to meet' and 'to meet you' for 'nice', got: %v", phraseCands)
 	}
 }
 
