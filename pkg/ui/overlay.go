@@ -12,17 +12,28 @@ import (
 	"github.com/gotk3/gotk3/gtk"
 )
 
+const maxSlots = 7
+
+// candidateSlot is a pre-allocated, permanently-live widget pair.
+// We NEVER call Destroy() on these — that's the entire point.
+type candidateSlot struct {
+	box   *gtk.EventBox
+	label *gtk.Label
+}
+
 type UIController struct {
-	window        *gtk.Window
-	entry         *gtk.Entry
-	candidateBox  *gtk.Box
+	window       *gtk.Window
+	entry        *gtk.Entry
+	candidateBox *gtk.Box
+	slots        [maxSlots]*candidateSlot // pre-allocated, never destroyed
+
 	candidates    []string
 	selectedIndex int
 	visible       bool
 	currentText   string
 
 	OnTextChanged func(text string)
-	OnCommit      func(text string, acceptedSuggestion bool)
+	OnCommit      func(text string)
 	OnHide        func()
 
 	mu sync.Mutex
@@ -30,7 +41,7 @@ type UIController struct {
 
 var controller *UIController
 
-func Start(onTextChanged func(text string), onCommit func(text string, acceptedSuggestion bool), onHide func()) (*UIController, error) {
+func Start(onTextChanged func(text string), onCommit func(text string), onHide func()) (*UIController, error) {
 	runtime.LockOSThread()
 
 	gtk.Init(nil)
@@ -45,21 +56,19 @@ func Start(onTextChanged func(text string), onCommit func(text string, acceptedS
 	win.SetKeepAbove(true)
 	win.SetSkipPagerHint(true)
 	win.SetSkipTaskbarHint(true)
-	win.SetDefaultSize(650, 110)
+	win.SetDefaultSize(800, 240)
 	win.SetPosition(gtk.WIN_POS_CENTER)
 
-	// Box layout with more spacing
-	mainBox, err := gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 6)
+	mainBox, err := gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 14)
 	if err != nil {
 		return nil, err
 	}
-	mainBox.SetMarginStart(15)
-	mainBox.SetMarginEnd(15)
-	mainBox.SetMarginTop(10)
-	mainBox.SetMarginBottom(10)
+	mainBox.SetMarginStart(25)
+	mainBox.SetMarginEnd(25)
+	mainBox.SetMarginTop(20)
+	mainBox.SetMarginBottom(20)
 	win.Add(mainBox)
 
-	// Text input field
 	entry, err := gtk.EntryNew()
 	if err != nil {
 		return nil, err
@@ -67,15 +76,13 @@ func Start(onTextChanged func(text string), onCommit func(text string, acceptedS
 	entry.SetPlaceholderText("Type your word or sentence here...")
 	mainBox.PackStart(entry, false, false, 0)
 
-	// Candidates list layout
 	candidateBox, err := gtk.BoxNew(gtk.ORIENTATION_HORIZONTAL, 8)
 	if err != nil {
 		return nil, err
 	}
 	mainBox.PackStart(candidateBox, true, true, 0)
 
-	// Status/tips label
-	tipsLabel, err := gtk.LabelNew("Tab / Up/Down: Cycle | Esc: Close | Enter: Commit")
+	tipsLabel, err := gtk.LabelNew("Tab: Apply & predict next  |  ↑↓: Cycle candidates  |  Enter: Paste  |  Esc: Close")
 	if err != nil {
 		return nil, err
 	}
@@ -93,10 +100,21 @@ func Start(onTextChanged func(text string), onCommit func(text string, acceptedS
 		OnHide:        onHide,
 	}
 
-	// Apply CSS Styling
+	// Pre-allocate candidate slots — created once, never destroyed.
+	// This is the core fix: zero widget.Destroy() calls = zero focus theft.
+	for i := 0; i < maxSlots; i++ {
+		slot, err := newCandidateSlot(controller, i)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create candidate slot %d: %w", i, err)
+		}
+		controller.slots[i] = slot
+		candidateBox.PackStart(slot.box, false, false, 0)
+	}
+
 	applyCSS()
 
-	// Connect signals
+	// "changed" signal fires automatically when entry.SetText is called,
+	// so applySuggestionAndPredict does NOT need to call OnTextChanged explicitly.
 	entry.Connect("changed", func() {
 		text, _ := entry.GetText()
 		controller.mu.Lock()
@@ -121,23 +139,47 @@ func Start(onTextChanged func(text string), onCommit func(text string, acceptedS
 
 		case gdk.KEY_Return, gdk.KEY_KP_Enter:
 			text, _ := entry.GetText()
-			acceptedSuggestion := false
 			if controller.selectedIndex >= 0 && controller.selectedIndex < len(controller.candidates) {
-				// Commit the selected candidate instead of raw text if one is highlighted
 				words := strings.Fields(text)
 				if len(words) > 0 {
 					words[len(words)-1] = controller.candidates[controller.selectedIndex]
 					text = strings.Join(words, " ") + " "
 				}
-				acceptedSuggestion = true
 			}
 			if controller.OnCommit != nil {
-				controller.OnCommit(text, acceptedSuggestion)
+				controller.OnCommit(text)
 			}
 			controller.Hide()
 			return true
 
-		case gdk.KEY_Tab, gdk.KEY_Down:
+		case gdk.KEY_Tab:
+			controller.mu.Lock()
+			idx := controller.selectedIndex
+			if idx < 0 && len(controller.candidates) > 0 {
+				idx = 0
+			}
+			controller.mu.Unlock()
+			if idx >= 0 && idx < len(controller.candidates) {
+				controller.applySuggestionAndPredict(idx)
+			}
+			return true
+
+		case gdk.KEY_ISO_Left_Tab:
+			controller.mu.Lock()
+			if len(controller.candidates) > 0 {
+				controller.selectedIndex--
+				if controller.selectedIndex < 0 {
+					controller.selectedIndex = len(controller.candidates) - 1
+				}
+				idx := controller.selectedIndex
+				controller.mu.Unlock()
+				controller.applySuggestionAndPredict(idx)
+			} else {
+				controller.mu.Unlock()
+			}
+			return true
+
+		case gdk.KEY_Down:
 			if len(controller.candidates) > 0 {
 				controller.mu.Lock()
 				controller.selectedIndex++
@@ -149,7 +191,7 @@ func Start(onTextChanged func(text string), onCommit func(text string, acceptedS
 			}
 			return true
 
-		case gdk.KEY_ISO_Left_Tab, gdk.KEY_Up:
+		case gdk.KEY_Up:
 			if len(controller.candidates) > 0 {
 				controller.mu.Lock()
 				controller.selectedIndex--
@@ -165,7 +207,6 @@ func Start(onTextChanged func(text string), onCommit func(text string, acceptedS
 		return false
 	})
 
-	// Do not destroy on delete, just hide
 	win.Connect("delete-event", func() bool {
 		controller.Hide()
 		if controller.OnHide != nil {
@@ -174,12 +215,48 @@ func Start(onTextChanged func(text string), onCommit func(text string, acceptedS
 		return true
 	})
 
-	// Start GTK main loop in a background thread to prevent blocking
 	go func() {
 		gtk.Main()
 	}()
 
 	return controller, nil
+}
+
+// newCandidateSlot creates a permanent EventBox+Label slot for candidate display.
+func newCandidateSlot(c *UIController, idx int) (*candidateSlot, error) {
+	box, err := gtk.EventBoxNew()
+	if err != nil {
+		return nil, err
+	}
+	// EventBox must NOT steal keyboard focus
+	box.SetCanFocus(false)
+
+	label, err := gtk.LabelNew("")
+	if err != nil {
+		return nil, err
+	}
+	label.SetCanFocus(false)
+	label.SetMarginStart(4)
+	label.SetMarginEnd(4)
+
+	ctx, err := label.GetStyleContext()
+	if err == nil {
+		ctx.AddClass("candidate-label")
+	}
+
+	box.Add(label)
+
+	// Click handler — capture idx at slot-creation time
+	slotIdx := idx
+	box.Connect("button-press-event", func() bool {
+		c.applySuggestionAndPredict(slotIdx)
+		return true
+	})
+
+	// Hidden by default
+	box.Hide()
+
+	return &candidateSlot{box: box, label: label}, nil
 }
 
 func applyCSS() {
@@ -198,8 +275,8 @@ func applyCSS() {
 		entry, entry text {
 			background-color: #ffffff;
 			color: #000000;
-			font-size: 18px;
-			padding: 6px 12px;
+			font-size: 26px;
+			padding: 10px 16px;
 			caret-color: #ff007f;
 		}
 		entry {
@@ -210,15 +287,15 @@ func applyCSS() {
 			border: 2px solid #00f0ff;
 		}
 		#tips-label {
-			font-size: 10px;
+			font-size: 14px;
 			color: #7b7b99;
-			margin-top: 4px;
+			margin-top: 8px;
 		}
 		.candidate-label {
-			font-size: 14px;
+			font-size: 20px;
 			color: #cfcfdb;
 			background-color: #21253b;
-			padding: 5px 12px;
+			padding: 10px 20px;
 			border-radius: 6px;
 			border: 1px solid #333957;
 		}
@@ -250,20 +327,9 @@ func (c *UIController) Show() {
 
 	glib.IdleAdd(func() {
 		c.window.ShowAll()
-
-		// Read primary selection to pre-populate text
-		initialText := ""
-		if clipboard, err := gtk.ClipboardGet(gdk.SELECTION_PRIMARY); err == nil {
-			if text, err := clipboard.WaitForText(); err == nil {
-				initialText = strings.TrimSpace(text)
-			}
-		}
-
-		c.entry.SetText(initialText)
+		c.entry.SetText("")
 		c.window.Present()
 		c.entry.GrabFocus()
-		c.entry.SetPosition(-1) // Move cursor to the end of initialText
-
 		c.mu.Lock()
 		c.candidates = nil
 		c.selectedIndex = -1
@@ -297,7 +363,11 @@ func (c *UIController) GetText() string {
 func (c *UIController) UpdateCandidates(candidates []string) {
 	c.mu.Lock()
 	c.candidates = candidates
-	c.selectedIndex = -1
+	if len(candidates) > 0 {
+		c.selectedIndex = 0
+	} else {
+		c.selectedIndex = -1
+	}
 	c.mu.Unlock()
 
 	glib.IdleAdd(func() {
@@ -305,56 +375,84 @@ func (c *UIController) UpdateCandidates(candidates []string) {
 	})
 }
 
+// renderCandidates updates the pre-allocated slot pool in-place.
+// No widgets are ever created or destroyed here — focus is never disrupted.
 func (c *UIController) renderCandidates() {
-	// Clear old children
-	children := c.candidateBox.GetChildren()
-	children.Foreach(func(item interface{}) {
-		if widget, ok := item.(*gtk.Widget); ok {
-			widget.Destroy()
-		}
-	})
-
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	candidates := make([]string, len(c.candidates))
+	copy(candidates, c.candidates)
+	selectedIdx := c.selectedIndex
+	c.mu.Unlock()
 
-	for i, cand := range c.candidates {
-		label, err := gtk.LabelNew(cand)
-		if err != nil {
-			continue
-		}
-		label.SetMarginStart(4)
-		label.SetMarginEnd(4)
-		
-		ctx, err := label.GetStyleContext()
-		if err == nil {
-			ctx.AddClass("candidate-label")
-			if i == c.selectedIndex {
-				ctx.AddClass("selected")
+	for i, slot := range c.slots {
+		if i < len(candidates) {
+			slot.label.SetText(candidates[i])
+
+			ctx, err := slot.label.GetStyleContext()
+			if err == nil {
+				if i == selectedIdx {
+					ctx.AddClass("selected")
+				} else {
+					ctx.RemoveClass("selected")
+				}
 			}
+			slot.box.ShowAll()
+		} else {
+			slot.box.Hide()
 		}
-
-		// Click to apply suggestion
-		idx := i
-		label.Connect("button-press-event", func() {
-			c.applySuggestion(idx)
-		})
-
-		c.candidateBox.PackStart(label, false, false, 0)
 	}
-	c.candidateBox.ShowAll()
 }
 
+// applySuggestion inserts the candidate at index (no next-word predict; used by keyboard cycling).
 func (c *UIController) applySuggestion(index int) {
+	c.mu.Lock()
 	if index < 0 || index >= len(c.candidates) {
+		c.mu.Unlock()
 		return
 	}
+	candidate := c.candidates[index]
+	c.mu.Unlock()
+
 	glib.IdleAdd(func() {
 		text, _ := c.entry.GetText()
 		words := strings.Fields(text)
-		if len(words) > 0 {
-			words[len(words)-1] = c.candidates[index]
-			c.entry.SetText(strings.Join(words, " ") + " ")
-			c.entry.SetPosition(-1) // Move cursor to end
+		var newText string
+		if strings.HasSuffix(text, " ") || len(words) == 0 {
+			newText = strings.TrimRight(text, " ") + " " + candidate + " "
+		} else {
+			words[len(words)-1] = candidate
+			newText = strings.Join(words, " ") + " "
 		}
+		c.entry.SetText(newText)
+		c.entry.SetPosition(-1)
+	})
+}
+
+// applySuggestionAndPredict applies a candidate via entry.SetText.
+// The "changed" signal on entry fires automatically and calls OnTextChanged,
+// so we do NOT call OnTextChanged explicitly (that would cause a double render).
+func (c *UIController) applySuggestionAndPredict(index int) {
+	c.mu.Lock()
+	if index < 0 || index >= len(c.candidates) {
+		c.mu.Unlock()
+		return
+	}
+	candidate := c.candidates[index]
+	c.mu.Unlock()
+
+	glib.IdleAdd(func() {
+		text, _ := c.entry.GetText()
+		words := strings.Fields(text)
+		var newText string
+		if strings.HasSuffix(text, " ") || len(words) == 0 {
+			newText = strings.TrimRight(text, " ") + " " + candidate + " "
+		} else {
+			words[len(words)-1] = candidate
+			newText = strings.Join(words, " ") + " "
+		}
+		// SetText fires the "changed" signal → onTextChanged → UpdateCandidates.
+		// Do NOT call OnTextChanged again here — that causes double rendering.
+		c.entry.SetText(newText)
+		c.entry.SetPosition(-1)
 	})
 }
