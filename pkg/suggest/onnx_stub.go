@@ -17,6 +17,7 @@ func NewOnnxPredictor(_, _ string) (*OnnxPredictor, error) {
 // The real implementation lives in onnx_predictor.go (build tag: onnx).
 type OnnxPredictor struct{}
 
-func (*OnnxPredictor) PredictNextContext(_ []string) []string { return nil }
-func (*OnnxPredictor) Starters() []string                    { return nil }
-func (*OnnxPredictor) Close() error                          { return nil }
+func (*OnnxPredictor) PredictNextContext(_ []string) []string  { return nil }
+func (*OnnxPredictor) PredictSentences(_ []string) []string    { return nil }
+func (*OnnxPredictor) Starters() []string                      { return nil }
+func (*OnnxPredictor) Close() error                            { return nil }

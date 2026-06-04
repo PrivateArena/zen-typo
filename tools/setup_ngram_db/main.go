@@ -11,6 +11,7 @@
 // Data source: Google Books 2-gram (English, 20120701 version)
 // https://storage.googleapis.com/books/ngrams/books/20120701/eng/2-00000-of-00589.gz
 // (we only download the first shard, ~200MB uncompressed → top 500K bigrams)
+//go:build ignore
 
 package main
 
@@ -30,8 +31,8 @@ import (
 )
 
 const (
-	defaultOutput     = "ngrams.db"
-	defaultMaxBigrams = 100_000
+	defaultOutput      = "ngrams.db"
+	defaultMaxBigrams  = 100_000
 	defaultMaxTrigrams = 50_000
 
 	// First shard of Google Books English 2-grams (smallest usable shard)
@@ -169,6 +170,7 @@ type trigramEntry struct {
 	w1, w2, w3 string
 	freq       int64
 }
+
 // importFromTextFile builds bigrams/trigrams by counting transitions in a
 // plain text file. Useful for domain-specific corpora.
 func importFromTextFile(inputPath, outputPath string, maxBigrams, maxTrigrams int) error {

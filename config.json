@@ -1,5 +1,5 @@
 {
-  "engine": "onnx",
+  "engine": "ngram",
   "ngram_db_path": "ngrams.db",
   "onnx_model_path": "model/distilgpt2.onnx",
   "onnx_vocab_path": "model/vocab.json",

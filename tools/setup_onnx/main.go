@@ -16,6 +16,7 @@
 //   model/distilgpt2.onnx    — quantized DistilGPT-2 model (40MB)
 //   model/vocab.json         — GPT-2 BPE vocabulary (1.0MB)
 //   model/merges.txt         — BPE merge rules (456KB)
+//go:build ignore
 
 package main
 
@@ -182,7 +183,7 @@ func downloadAndExtractRuntime() error {
 		if strings.HasSuffix(header.Name, "libonnxruntime.so.1.25.0") {
 			dest := "libonnxruntime.so"
 			log.Printf("Extracting %s → %s", header.Name, dest)
-			
+
 			f, err := os.OpenFile(dest, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0755)
 			if err != nil {
 				return err
