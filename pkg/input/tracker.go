@@ -46,8 +46,12 @@ const (
 type WordTracker struct {
 	mu sync.Mutex
 
-	fragment string   // characters typed since last word boundary
-	words    []string // last N committed words (context)
+	fragment       string   // characters typed since last word boundary
+	words          []string // last N committed words (context)
+	altPressed     bool     // tracks Alt state for hotkeys
+	ctrlPressed    bool     // tracks Ctrl state for hotkeys
+	superPressed   bool     // tracks Super state for hotkeys
+	SelectModifier string   // "alt" | "ctrl" | "super" | "ctrl+alt" | "none"
 
 	// OnFragment is called on every fragment change with (fragment, wordContext).
 	OnFragment func(fragment string, words []string)
@@ -56,22 +60,65 @@ type WordTracker struct {
 	OnSpace func(word string, words []string)
 	// OnBoundary is called on any non-space word boundary (Enter, Escape, etc.).
 	OnBoundary func()
+	// OnChooseCandidate is called when selection hotkey is pressed. Returns true if candidate selection succeeded.
+	OnChooseCandidate func(index int) bool
 }
 
 func NewWordTracker() *WordTracker {
-	return &WordTracker{}
+	return &WordTracker{
+		SelectModifier: "alt", // default
+	}
 }
 
 // Feed processes a single raw key event. Call this from hotkey.SetKeyEventCallback.
 func (t *WordTracker) Feed(keycode int, isPress bool) {
-	if !isPress {
-		return // only care about presses
-	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	switch keycode {
-	case kcShiftL, kcShiftR, kcCtrlL, kcCtrlR, kcAltL, kcAltR, kcSuper:
+	case kcAltL, kcAltR:
+		t.altPressed = isPress
+		return
+	case kcCtrlL, kcCtrlR:
+		t.ctrlPressed = isPress
+		return
+	case kcSuper:
+		t.superPressed = isPress
+		return
+	}
+
+	if !isPress {
+		return // only care about presses for non-modifiers
+	}
+
+	// Hotkey selection from 1 to 5 (keycodes 10 to 14)
+	if keycode >= 10 && keycode <= 14 {
+		var modifierMatch bool
+		switch t.SelectModifier {
+		case "alt":
+			modifierMatch = t.altPressed && !t.ctrlPressed && !t.superPressed
+		case "ctrl":
+			modifierMatch = t.ctrlPressed && !t.altPressed && !t.superPressed
+		case "super":
+			modifierMatch = t.superPressed && !t.altPressed && !t.ctrlPressed
+		case "ctrl+alt":
+			modifierMatch = t.ctrlPressed && t.altPressed && !t.superPressed
+		case "none":
+			modifierMatch = false
+		default: // fallback to alt
+			modifierMatch = t.altPressed && !t.ctrlPressed && !t.superPressed
+		}
+
+		if modifierMatch && t.OnChooseCandidate != nil {
+			idx := keycode - 10
+			if t.OnChooseCandidate(idx) {
+				return // handled and consumed!
+			}
+		}
+	}
+
+	switch keycode {
+	case kcShiftL, kcShiftR:
 		return // modifiers alone don't affect the fragment
 
 	case kcBackspace:

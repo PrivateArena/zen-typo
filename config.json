@@ -8,7 +8,9 @@
   "max_suggestions": 5,
   "enable_sentence_suggestions": false,
   "max_sentence_suggestions": 1,
-  "enable_autocorrect": true,
+  "enable_autocorrect": false,
+  "enable_strip": true,
+  "strip_select_modifier": "super",
   "dict_path": "/usr/share/dict/words",
   "autocorrect_ignore_apps": [
     "terminal",

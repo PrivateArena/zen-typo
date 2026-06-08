@@ -47,6 +47,9 @@ type Config struct {
 	// EnableStrip shows the ambient always-on tray strip while the user types.
 	EnableStrip bool `json:"enable_strip"`
 
+	// StripSelectModifier controls the modifier key used to select candidates from the strip: "alt" | "super" | "ctrl" | "ctrl+alt" | "none"
+	StripSelectModifier string `json:"strip_select_modifier"`
+
 	// EnableAutocorrect silently replaces high-confidence typos when Space is pressed.
 	EnableAutocorrect bool `json:"enable_autocorrect"`
 
@@ -80,6 +83,7 @@ func Default() *Config {
 		EnableSentenceSuggestions: true,
 		MaxSentenceSuggestions:    3,
 		EnableStrip:               true,
+		StripSelectModifier:       "alt",
 		EnableAutocorrect:         true,
 		AutocorrectMaxDist:        1.0,
 		DictPath:                  "/usr/share/dict/words",

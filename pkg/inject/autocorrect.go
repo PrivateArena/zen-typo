@@ -108,6 +108,23 @@ func ReplaceWord(wordLen int, replacement string) error {
 	}
 	c := xu.Conn()
 
+	// Release any physically held modifiers to prevent keystroke contamination during simulation
+	releaseKey := func(name string) {
+		if _, kcs, err := keybind.ParseString(xu, name); err == nil && len(kcs) > 0 {
+			for _, kc := range kcs {
+				xtest.FakeInput(c, xproto.KeyRelease, byte(kc), 0, 0, 0, 0, 0)
+			}
+		}
+	}
+	releaseKey("Alt_L")
+	releaseKey("Alt_R")
+	releaseKey("Control_L")
+	releaseKey("Control_R")
+	releaseKey("Shift_L")
+	releaseKey("Shift_R")
+	releaseKey("Super_L")
+	releaseKey("Super_R")
+
 	// Resolve backspace keycode
 	_, bsKcs, _ := keybind.ParseString(xu, "BackSpace")
 	var bsKC byte = 22

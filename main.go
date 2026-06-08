@@ -81,6 +81,7 @@ func main() {
 
 	// 7. Word tracker — feeds strip + autocorrect from raw key events
 	tracker = input.NewWordTracker()
+	tracker.SelectModifier = cfg.StripSelectModifier
 	tracker.OnFragment = onTrackerFragment
 	tracker.OnSpace = onTrackerSpace
 	tracker.OnBoundary = func() {
@@ -102,6 +103,9 @@ func main() {
 				if err := inject.ReplaceWord(fragLen, word); err != nil {
 					log.Printf("[Strip] Inject error: %v", err)
 				}
+			}
+			tracker.OnChooseCandidate = func(idx int) bool {
+				return strip.SelectCandidate(idx)
 			}
 		}
 	}

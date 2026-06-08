@@ -151,7 +151,8 @@ func (s *Strip) UpdateCandidates(candidates []string, fragmentLen int) {
 		for i := 0; i < stripSlots; i++ {
 			slot := s.slots[i]
 			if i < len(candidates) {
-				slot.label.SetText(candidates[i])
+				// Use Pango markup to style the selection number visually (e.g. pink neon index)
+				slot.label.SetMarkup(fmt.Sprintf("<span color='#ff007f'>%d</span> <span color='#e8e0ff'>%s</span>", i+1, candidates[i]))
 				slot.box.SetVisible(true)
 			} else {
 				slot.label.SetText("")
@@ -181,6 +182,22 @@ func (s *Strip) handleClick(idx int) {
 	if cb := s.OnSelect; cb != nil {
 		go cb(word, flen)
 	}
+}
+
+// SelectCandidate triggers selection of candidate at idx on the GTK main thread.
+// Returns true if candidate index was valid and selected. Safe to call from any goroutine.
+func (s *Strip) SelectCandidate(idx int) bool {
+	var selected bool
+	done := make(chan struct{})
+	glib.IdleAdd(func() {
+		if idx >= 0 && idx < len(s.candidates) {
+			s.handleClick(idx)
+			selected = true
+		}
+		close(done)
+	})
+	<-done
+	return selected
 }
 
 // screenDimensions returns the width and height of the default X11 screen.
