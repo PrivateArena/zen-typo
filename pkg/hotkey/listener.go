@@ -128,8 +128,11 @@ func goKeyCallback(keycode C.int, isPress C.int) {
 		mu.Lock()
 		suppressed := time.Now().Before(suppressUntil)
 		mu.Unlock()
-		if !suppressed {
-			cb(int(keycode), isPress == 1)
+		kc := int(keycode)
+		// Always allow modifier keys to bypass suppression so their state in the tracker stays in sync
+		isModifier := kc == 37 || kc == 105 || kc == 50 || kc == 62 || kc == 64 || kc == 108 || kc == 133 || kc == 134
+		if !suppressed || isModifier {
+			cb(kc, isPress == 1)
 		}
 	}
 

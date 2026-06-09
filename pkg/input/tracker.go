@@ -163,11 +163,14 @@ func (t *WordTracker) Feed(keycode int, isPress bool) {
 	}
 }
 
-// Reset clears the fragment and word history (e.g. when the overlay commits).
+// Reset clears the fragment, word history, and modifier states.
 func (t *WordTracker) Reset() {
 	t.mu.Lock()
 	t.fragment = ""
 	t.words = nil
+	t.altPressed = false
+	t.ctrlPressed = false
+	t.superPressed = false
 	t.mu.Unlock()
 }
 
