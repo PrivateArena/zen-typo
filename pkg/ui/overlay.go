@@ -2,44 +2,30 @@ package ui
 
 import (
 	"fmt"
+	"image"
 	"log"
-	"runtime"
+	"os"
 	"strings"
 	"sync"
-	"time"
 
-	"github.com/gotk3/gotk3/gdk"
-	"github.com/gotk3/gotk3/glib"
-	"github.com/gotk3/gotk3/gtk"
+	"github.com/BurntSushi/freetype-go/freetype/truetype"
 	"github.com/jezek/xgb/xproto"
 	"github.com/jezek/xgbutil"
+	"github.com/jezek/xgbutil/keybind"
+	"github.com/jezek/xgbutil/xevent"
+	"github.com/jezek/xgbutil/xgraphics"
+	"github.com/jezek/xgbutil/xwindow"
 )
 
-const maxSlots = 7
-
-// candidateSlot is a pre-allocated, permanently-live widget pair.
-// We NEVER call Destroy() on these — that's the entire point.
-type candidateSlot struct {
-	box   *gtk.EventBox
-	label *gtk.Label
-}
-
 type UIController struct {
-	window       *gtk.Window
-	entry        *gtk.Entry
-	candidateBox *gtk.Box
-	slots        [maxSlots]*candidateSlot // pre-allocated, never destroyed
-
-	sentenceBox    *gtk.Box
-	sentenceBoxes  [3]*gtk.EventBox
-	sentenceLabels [3]*gtk.Label
-
+	X                     *xgbutil.XUtil
+	win                   *xwindow.Window
+	visible               bool
+	currentText           string
 	candidates            []string
 	selectedIndex         int
 	sentences             []string
 	selectedSentenceIndex int
-	visible               bool
-	currentText           string
 
 	OnTextChanged func(text string)
 	OnCommit      func(text string)
@@ -48,427 +34,125 @@ type UIController struct {
 	mu sync.Mutex
 }
 
-var controller *UIController
+var (
+	X   *xgbutil.XUtil
+	xmu sync.Mutex
+)
+
+func getX() (*xgbutil.XUtil, error) {
+	xmu.Lock()
+	defer xmu.Unlock()
+	if X != nil {
+		return X, nil
+	}
+	var err error
+	X, err = xgbutil.NewConn()
+	if err != nil {
+		return nil, err
+	}
+	keybind.Initialize(X)
+	go xevent.Main(X)
+	return X, nil
+}
+
+func loadTTFFont() (*truetype.Font, error) {
+	paths := []string{
+		"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+		"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+		"/usr/share/fonts/TTF/DejaVuSans.ttf",
+		"/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+	}
+	var fontBytes []byte
+	var err error
+	for _, p := range paths {
+		fontBytes, err = os.ReadFile(p)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("could not find any system TTF font: %w", err)
+	}
+	return truetype.Parse(fontBytes)
+}
 
 func Start(onTextChanged func(text string), onCommit func(text string), onHide func()) (*UIController, error) {
-	runtime.LockOSThread()
-
-	gtk.Init(nil)
-
-	win, err := gtk.WindowNew(gtk.WINDOW_TOPLEVEL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create window: %w", err)
-	}
-
-	win.SetTitle("zen-typo")
-	win.SetDecorated(false)
-	win.SetKeepAbove(true)
-	win.SetSkipPagerHint(true)
-	win.SetSkipTaskbarHint(true)
-	win.SetFocusOnMap(true)
-	win.SetAcceptFocus(true)
-	win.SetTypeHint(gdk.WINDOW_TYPE_HINT_POPUP_MENU)
-	win.SetDefaultSize(800, 360)
-	win.SetPosition(gtk.WIN_POS_CENTER)
-
-	mainBox, err := gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 14)
+	xu, err := getX()
 	if err != nil {
 		return nil, err
 	}
-	mainBox.SetMarginStart(25)
-	mainBox.SetMarginEnd(25)
-	mainBox.SetMarginTop(20)
-	mainBox.SetMarginBottom(20)
-	win.Add(mainBox)
 
-	entry, err := gtk.EntryNew()
+	win, err := xwindow.Generate(xu)
 	if err != nil {
 		return nil, err
 	}
-	entry.SetPlaceholderText("Type your word or sentence here...")
-	mainBox.PackStart(entry, false, false, 0)
 
-	candidateBox, err := gtk.BoxNew(gtk.ORIENTATION_HORIZONTAL, 8)
+	sw, sh := screenDimensions()
+	winWidth, winHeight := 800, 360
+	x := (sw - winWidth) / 2
+	y := (sh - winHeight) / 2
+
+	err = win.CreateChecked(
+		xu.RootWin(),
+		x, y,
+		winWidth, winHeight,
+		xproto.CwBackPixel|xproto.CwOverrideRedirect|xproto.CwEventMask,
+		0x161624, // background color
+		1,        // override redirect
+		xproto.EventMaskExposure|xproto.EventMaskKeyPress,
+	)
 	if err != nil {
 		return nil, err
 	}
-	mainBox.PackStart(candidateBox, true, true, 0)
 
-	sentenceBox, err := gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 6)
-	if err != nil {
-		return nil, err
-	}
-	mainBox.PackStart(sentenceBox, false, false, 0)
-
-	tipsLabel, err := gtk.LabelNew("Tab: Apply word  |  ↑↓: Cycle words  |  Shift+↑↓: Cycle sentences  |  Shift+Tab: Apply sentence  |  Enter: Paste")
-	if err != nil {
-		return nil, err
-	}
-	tipsLabel.SetHAlign(gtk.ALIGN_START)
-	tipsLabel.SetVAlign(gtk.ALIGN_CENTER)
-	tipsLabel.SetName("tips-label")
-	mainBox.PackEnd(tipsLabel, false, false, 0)
-
-	controller = &UIController{
-		window:        win,
-		entry:         entry,
-		candidateBox:  candidateBox,
-		sentenceBox:   sentenceBox,
+	c := &UIController{
+		X:             xu,
+		win:           win,
 		OnTextChanged: onTextChanged,
 		OnCommit:      onCommit,
 		OnHide:        onHide,
 	}
 
-	// Pre-allocate candidate slots — created once, never destroyed.
-	// This is the core fix: zero widget.Destroy() calls = zero focus theft.
-	for i := 0; i < maxSlots; i++ {
-		slot, err := newCandidateSlot(controller, i)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create candidate slot %d: %w", i, err)
-		}
-		controller.slots[i] = slot
-		candidateBox.PackStart(slot.box, false, false, 0)
-	}
+	// Connect exposure handler
+	xevent.ExposeFun(func(X *xgbutil.XUtil, ev xevent.ExposeEvent) {
+		c.mu.Lock()
+		c.renderLocked()
+		c.mu.Unlock()
+	}).Connect(xu, win.Id)
 
-	// Pre-allocate sentence slots
-	for i := 0; i < 3; i++ {
-		sBox, err := gtk.EventBoxNew()
-		if err != nil {
-			return nil, err
-		}
-		sBox.SetCanFocus(false)
+	// Connect key press handler
+	xevent.KeyPressFun(func(X *xgbutil.XUtil, ev xevent.KeyPressEvent) {
+		keyStr := keybind.LookupString(X, ev.State, ev.Detail)
+		isShift := (ev.State & xproto.ModMaskShift) != 0
+		c.handleKeyPress(keyStr, isShift)
+	}).Connect(xu, win.Id)
 
-		sLabel, err := gtk.LabelNew("")
-		if err != nil {
-			return nil, err
-		}
-		sLabel.SetCanFocus(false)
-		sLabel.SetHAlign(gtk.ALIGN_START)
-		sLabel.SetMarginStart(10)
-		sLabel.SetMarginEnd(10)
-		sLabel.SetMarginTop(6)
-		sLabel.SetMarginBottom(6)
-
-		ctx, err := sLabel.GetStyleContext()
-		if err == nil {
-			ctx.AddClass("sentence-label")
-		}
-
-		sBox.Add(sLabel)
-		sentenceBox.PackStart(sBox, false, false, 0)
-
-		// Click handler for sentence box
-		idx := i
-		sBox.Connect("button-press-event", func() bool {
-			controller.applySentence(idx)
-			return true
-		})
-
-		controller.sentenceBoxes[i] = sBox
-		controller.sentenceLabels[i] = sLabel
-		sBox.Hide()
-	}
-
-	applyCSS()
-
-	// "changed" signal fires automatically when entry.SetText is called,
-	// so applySuggestionAndPredict does NOT need to call OnTextChanged explicitly.
-	entry.Connect("changed", func() {
-		text, _ := entry.GetText()
-		controller.mu.Lock()
-		controller.currentText = text
-		controller.mu.Unlock()
-		if controller.OnTextChanged != nil {
-			controller.OnTextChanged(text)
-		}
-	})
-	win.Connect("key-press-event", func(w *gtk.Window, event *gdk.Event) bool {
-		keyEvent := gdk.EventKeyNewFromEvent(event)
-		keyval := keyEvent.KeyVal()
-		state := keyEvent.State()
-		isShift := (state & uint(gdk.SHIFT_MASK)) != 0
-
-		switch keyval {
-		case gdk.KEY_Escape:
-			controller.Hide()
-			if controller.OnHide != nil {
-				controller.OnHide()
-			}
-			return true
-
-		case gdk.KEY_Return, gdk.KEY_KP_Enter:
-			text, _ := entry.GetText()
-			if controller.selectedIndex >= 0 && controller.selectedIndex < len(controller.candidates) {
-				words := strings.Fields(text)
-				if len(words) > 0 {
-					words[len(words)-1] = controller.candidates[controller.selectedIndex]
-					text = strings.Join(words, " ") + " "
-				}
-			}
-			if controller.OnCommit != nil {
-				controller.OnCommit(text)
-			}
-			controller.Hide()
-			return true
-
-		case gdk.KEY_Tab:
-			if isShift {
-				controller.mu.Lock()
-				idx := controller.selectedSentenceIndex
-				if idx < 0 && len(controller.sentences) > 0 {
-					idx = 0
-				}
-				controller.mu.Unlock()
-				if idx >= 0 && idx < len(controller.sentences) {
-					controller.applySentence(idx)
-				}
-			} else {
-				controller.mu.Lock()
-				idx := controller.selectedIndex
-				if idx < 0 && len(controller.candidates) > 0 {
-					idx = 0
-				}
-				controller.mu.Unlock()
-				if idx >= 0 && idx < len(controller.candidates) {
-					controller.applySuggestion(idx)
-				}
-			}
-			return true
-
-		case gdk.KEY_ISO_Left_Tab:
-			controller.mu.Lock()
-			idx := controller.selectedSentenceIndex
-			if idx < 0 && len(controller.sentences) > 0 {
-				idx = 0
-			}
-			controller.mu.Unlock()
-			if idx >= 0 && idx < len(controller.sentences) {
-				controller.applySentence(idx)
-			}
-			return true
-
-		case gdk.KEY_Down:
-			if isShift {
-				if len(controller.sentences) > 0 {
-					controller.mu.Lock()
-					controller.selectedSentenceIndex++
-					if controller.selectedSentenceIndex >= len(controller.sentences) {
-						controller.selectedSentenceIndex = 0
-					}
-					controller.mu.Unlock()
-					controller.renderSentences()
-				}
-			} else {
-				if len(controller.candidates) > 0 {
-					controller.mu.Lock()
-					controller.selectedIndex++
-					if controller.selectedIndex >= len(controller.candidates) {
-						controller.selectedIndex = 0
-					}
-					controller.mu.Unlock()
-					controller.renderCandidates()
-				}
-			}
-			return true
-
-		case gdk.KEY_Up:
-			if isShift {
-				if len(controller.sentences) > 0 {
-					controller.mu.Lock()
-					controller.selectedSentenceIndex--
-					if controller.selectedSentenceIndex < 0 {
-						controller.selectedSentenceIndex = len(controller.sentences) - 1
-					}
-					controller.mu.Unlock()
-					controller.renderSentences()
-				}
-			} else {
-				if len(controller.candidates) > 0 {
-					controller.mu.Lock()
-					controller.selectedIndex--
-					if controller.selectedIndex < 0 {
-						controller.selectedIndex = len(controller.candidates) - 1
-					}
-					controller.mu.Unlock()
-					controller.renderCandidates()
-				}
-			}
-			return true
-		}
-
-		return false
-	})
-
-	win.Connect("delete-event", func() bool {
-		controller.Hide()
-		if controller.OnHide != nil {
-			controller.OnHide()
-		}
-		return true
-	})
-
-	go func() {
-		gtk.Main()
-	}()
-
-	return controller, nil
-}
-
-// newCandidateSlot creates a permanent EventBox+Label slot for candidate display.
-func newCandidateSlot(c *UIController, idx int) (*candidateSlot, error) {
-	box, err := gtk.EventBoxNew()
-	if err != nil {
-		return nil, err
-	}
-	// EventBox must NOT steal keyboard focus
-	box.SetCanFocus(false)
-
-	label, err := gtk.LabelNew("")
-	if err != nil {
-		return nil, err
-	}
-	label.SetCanFocus(false)
-	label.SetMarginStart(4)
-	label.SetMarginEnd(4)
-
-	ctx, err := label.GetStyleContext()
-	if err == nil {
-		ctx.AddClass("candidate-label")
-	}
-
-	box.Add(label)
-
-	// Click handler — capture idx at slot-creation time
-	slotIdx := idx
-	box.Connect("button-press-event", func() bool {
-		c.applySuggestion(slotIdx)
-		return true
-	})
-
-	// Hidden by default
-	box.Hide()
-
-	return &candidateSlot{box: box, label: label}, nil
-}
-
-func applyCSS() {
-	cssProvider, err := gtk.CssProviderNew()
-	if err != nil {
-		log.Printf("Failed to create CSS provider: %v", err)
-		return
-	}
-
-	css := `
-		window {
-			background-color: #161624;
-			border: 3px solid #00f0ff;
-			border-radius: 12px;
-		}
-		entry, entry text {
-			background-color: #ffffff;
-			color: #000000;
-			font-size: 26px;
-			padding: 10px 16px;
-			caret-color: #ff007f;
-		}
-		entry {
-			border: 1px solid #ff007f;
-			border-radius: 8px;
-		}
-		entry:focus, entry text:focus {
-			border: 2px solid #00f0ff;
-		}
-		#tips-label {
-			font-size: 14px;
-			color: #7b7b99;
-			margin-top: 8px;
-		}
-		.candidate-label {
-			font-size: 20px;
-			color: #cfcfdb;
-			background-color: #21253b;
-			padding: 10px 20px;
-			border-radius: 6px;
-			border: 1px solid #333957;
-		}
-		.candidate-label.selected {
-			background-color: #ff007f;
-			color: #ffffff;
-			border: 1px solid #ff007f;
-			font-weight: bold;
-		}
-		.sentence-label {
-			font-size: 18px;
-			color: #a3a3c2;
-			background-color: #1e1e2f;
-			padding: 8px 16px;
-			border-radius: 6px;
-			border: 1px solid #2e2e4a;
-		}
-		.sentence-label.selected {
-			background-color: #00f0ff;
-			color: #000000;
-			border: 1px solid #00f0ff;
-			font-weight: bold;
-		}
-	`
-
-	err = cssProvider.LoadFromData(css)
-	if err != nil {
-		log.Printf("Failed to load CSS: %v", err)
-		return
-	}
-
-	screen, err := gdk.ScreenGetDefault()
-	if err == nil {
-		gtk.AddProviderForScreen(screen, cssProvider, gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-	}
+	return c, nil
 }
 
 func (c *UIController) Show() {
 	c.mu.Lock()
 	c.visible = true
 	c.currentText = ""
+	c.candidates = nil
+	c.selectedIndex = -1
+	c.sentences = nil
+	c.selectedSentenceIndex = -1
+	c.win.Map()
+	c.win.Focus()
+	c.renderLocked()
 	c.mu.Unlock()
-
-	glib.IdleAdd(func() {
-		c.window.ShowAll()
-		c.entry.SetText("")
-		c.window.SetKeepAbove(true)
-		c.window.PresentWithTime(uint32(gdk.CURRENT_TIME))
-
-		// Defer focus grab to a nested idle handler to guarantee the window is mapped and focused
-		glib.IdleAdd(func() {
-			c.entry.GrabFocus()
-			if gdkWin, err := c.window.GetWindow(); err == nil && gdkWin != nil {
-				xid := gdkWin.GetXID()
-				go func(id uint32) {
-					// Wait 50ms for X11 mapping
-					time.Sleep(50 * time.Millisecond)
-					forceX11Focus(id)
-				}(xid)
-			}
-		})
-
-		c.mu.Lock()
-		c.candidates = nil
-		c.selectedIndex = -1
-		c.sentences = nil
-		c.selectedSentenceIndex = -1
-		c.mu.Unlock()
-		c.renderCandidates()
-		c.renderSentences()
-	})
 }
 
 func (c *UIController) Hide() {
 	c.mu.Lock()
-	c.visible = false
+	c.hideLocked()
 	c.mu.Unlock()
+}
 
-	glib.IdleAdd(func() {
-		c.window.Hide()
-	})
+func (c *UIController) hideLocked() {
+	c.visible = false
+	c.win.Unmap()
 }
 
 func (c *UIController) IsVisible() bool {
@@ -487,144 +171,294 @@ func (c *UIController) UpdateCandidates(candidates []string) {
 	c.mu.Lock()
 	c.candidates = candidates
 	c.selectedIndex = -1
+	c.renderLocked()
 	c.mu.Unlock()
-
-	glib.IdleAdd(func() {
-		c.renderCandidates()
-	})
-}
-
-// renderCandidates updates the pre-allocated slot pool in-place.
-// No widgets are ever created or destroyed here — focus is never disrupted.
-func (c *UIController) renderCandidates() {
-	c.mu.Lock()
-	candidates := make([]string, len(c.candidates))
-	copy(candidates, c.candidates)
-	selectedIdx := c.selectedIndex
-	c.mu.Unlock()
-
-	for i, slot := range c.slots {
-		if i < len(candidates) {
-			slot.label.SetText(candidates[i])
-
-			ctx, err := slot.label.GetStyleContext()
-			if err == nil {
-				if i == selectedIdx {
-					ctx.AddClass("selected")
-				} else {
-					ctx.RemoveClass("selected")
-				}
-			}
-			slot.box.ShowAll()
-		} else {
-			slot.box.Hide()
-		}
-	}
-}
-
-// applySuggestion applies a candidate via entry.SetText.
-// The "changed" signal on entry fires automatically and calls OnTextChanged,
-// so we do NOT call OnTextChanged explicitly (that would cause a double render).
-func (c *UIController) applySuggestion(index int) {
-	c.mu.Lock()
-	if index < 0 || index >= len(c.candidates) {
-		c.mu.Unlock()
-		return
-	}
-	candidate := c.candidates[index]
-	c.mu.Unlock()
-
-	glib.IdleAdd(func() {
-		text, _ := c.entry.GetText()
-		words := strings.Fields(text)
-		var newText string
-		if strings.HasSuffix(text, " ") || len(words) == 0 {
-			newText = strings.TrimRight(text, " ") + " " + candidate + " "
-		} else {
-			words[len(words)-1] = candidate
-			newText = strings.Join(words, " ") + " "
-		}
-		// SetText fires the "changed" signal → onTextChanged → UpdateCandidates.
-		c.entry.SetText(newText)
-		c.entry.SetPosition(-1)
-	})
 }
 
 func (c *UIController) UpdateSentences(sentences []string) {
 	c.mu.Lock()
 	c.sentences = sentences
 	c.selectedSentenceIndex = -1
+	c.renderLocked()
 	c.mu.Unlock()
-
-	glib.IdleAdd(func() {
-		c.renderSentences()
-	})
 }
 
-func (c *UIController) renderSentences() {
+func (c *UIController) handleKeyPress(keyStr string, isShift bool) {
 	c.mu.Lock()
-	sentences := make([]string, len(c.sentences))
-	copy(sentences, c.sentences)
-	selectedIdx := c.selectedSentenceIndex
-	c.mu.Unlock()
+	defer c.mu.Unlock()
 
-	if len(sentences) > 0 {
-		c.sentenceBox.Show()
-	} else {
-		c.sentenceBox.Hide()
+	if !c.visible {
+		return
 	}
 
-	for i := 0; i < 3; i++ {
-		slotBox := c.sentenceBoxes[i]
-		slotLabel := c.sentenceLabels[i]
-
-		if i < len(sentences) {
-			slotLabel.SetText(sentences[i])
-
-			ctx, err := slotLabel.GetStyleContext()
-			if err == nil {
-				if i == selectedIdx {
-					ctx.AddClass("selected")
-				} else {
-					ctx.RemoveClass("selected")
-				}
+	switch keyStr {
+	case "Escape":
+		c.hideLocked()
+		if c.OnHide != nil {
+			go c.OnHide()
+		}
+	case "Return", "KP_Enter":
+		text := c.currentText
+		if c.selectedIndex >= 0 && c.selectedIndex < len(c.candidates) {
+			words := strings.Fields(text)
+			if len(words) > 0 {
+				words[len(words)-1] = c.candidates[c.selectedIndex]
+				text = strings.Join(words, " ") + " "
 			}
-			slotBox.ShowAll()
+		}
+		c.hideLocked()
+		if c.OnCommit != nil {
+			go c.OnCommit(text)
+		}
+	case "Tab":
+		if isShift {
+			idx := c.selectedSentenceIndex
+			if idx < 0 && len(c.sentences) > 0 {
+				idx = 0
+			}
+			if idx >= 0 && idx < len(c.sentences) {
+				c.applySentenceLocked(idx)
+			}
 		} else {
-			slotBox.Hide()
+			idx := c.selectedIndex
+			if idx < 0 && len(c.candidates) > 0 {
+				idx = 0
+			}
+			if idx >= 0 && idx < len(c.candidates) {
+				c.applySuggestionLocked(idx)
+			}
+		}
+	case "ISO_Left_Tab":
+		idx := c.selectedSentenceIndex
+		if idx < 0 && len(c.sentences) > 0 {
+			idx = 0
+		}
+		if idx >= 0 && idx < len(c.sentences) {
+			c.applySentenceLocked(idx)
+		}
+	case "BackSpace":
+		if len(c.currentText) > 0 {
+			runes := []rune(c.currentText)
+			c.currentText = string(runes[:len(runes)-1])
+			if c.OnTextChanged != nil {
+				go c.OnTextChanged(c.currentText)
+			}
+			c.renderLocked()
+		}
+	case "Down":
+		if isShift {
+			if len(c.sentences) > 0 {
+				c.selectedSentenceIndex++
+				if c.selectedSentenceIndex >= len(c.sentences) {
+					c.selectedSentenceIndex = 0
+				}
+				c.renderLocked()
+			}
+		} else {
+			if len(c.candidates) > 0 {
+				c.selectedIndex++
+				if c.selectedIndex >= len(c.candidates) {
+					c.selectedIndex = 0
+				}
+				c.renderLocked()
+			}
+		}
+	case "Up":
+		if isShift {
+			if len(c.sentences) > 0 {
+				c.selectedSentenceIndex--
+				if c.selectedSentenceIndex < 0 {
+					c.selectedSentenceIndex = len(c.sentences) - 1
+				}
+				c.renderLocked()
+			}
+		} else {
+			if len(c.candidates) > 0 {
+				c.selectedIndex--
+				if c.selectedIndex < 0 {
+					c.selectedIndex = len(c.candidates) - 1
+				}
+				c.renderLocked()
+			}
+		}
+	case "space":
+		c.currentText += " "
+		if c.OnTextChanged != nil {
+			go c.OnTextChanged(c.currentText)
+		}
+		c.renderLocked()
+	default:
+		runes := []rune(keyStr)
+		if len(runes) == 1 && runes[0] >= 32 && runes[0] < 127 {
+			c.currentText += keyStr
+			if c.OnTextChanged != nil {
+				go c.OnTextChanged(c.currentText)
+			}
+			c.renderLocked()
 		}
 	}
 }
 
-func (c *UIController) applySentence(index int) {
-	c.mu.Lock()
+func (c *UIController) applySuggestionLocked(index int) {
+	if index < 0 || index >= len(c.candidates) {
+		return
+	}
+	candidate := c.candidates[index]
+	words := strings.Fields(c.currentText)
+	var newText string
+	if strings.HasSuffix(c.currentText, " ") || len(words) == 0 {
+		newText = strings.TrimRight(c.currentText, " ") + " " + candidate + " "
+	} else {
+		words[len(words)-1] = candidate
+		newText = strings.Join(words, " ") + " "
+	}
+	c.currentText = newText
+	if c.OnTextChanged != nil {
+		go c.OnTextChanged(newText)
+	}
+	c.renderLocked()
+}
+
+func (c *UIController) applySentenceLocked(index int) {
 	if index < 0 || index >= len(c.sentences) {
-		c.mu.Unlock()
 		return
 	}
 	sentence := c.sentences[index]
-	c.mu.Unlock()
-
-	glib.IdleAdd(func() {
-		text, _ := c.entry.GetText()
-		var newText string
-		if strings.HasSuffix(text, " ") || text == "" {
-			newText = text + sentence + " "
-		} else {
-			newText = text + " " + sentence + " "
-		}
-		c.entry.SetText(newText)
-		c.entry.SetPosition(-1)
-	})
+	var newText string
+	if strings.HasSuffix(c.currentText, " ") || c.currentText == "" {
+		newText = c.currentText + sentence + " "
+	} else {
+		newText = c.currentText + " " + sentence + " "
+	}
+	c.currentText = newText
+	if c.OnTextChanged != nil {
+		go c.OnTextChanged(newText)
+	}
+	c.renderLocked()
 }
 
-func forceX11Focus(xid uint32) {
-	xu, err := xgbutil.NewConn()
-	if err != nil {
+func (c *UIController) renderLocked() {
+	if !c.visible {
 		return
 	}
-	defer xu.Conn().Close()
 
-	// Direct X11 SetInputFocus bypasses any window manager focus stealing prevention policies
-	_ = xproto.SetInputFocusChecked(xu.Conn(), xproto.InputFocusParent, xproto.Window(xid), xproto.Timestamp(0)).Check()
+	winWidth, winHeight := 800, 360
+	img := xgraphics.New(c.X, image.Rect(0, 0, winWidth, winHeight))
+
+	// Background
+	bg := xgraphics.BGRA{R: 0x16, G: 0x16, B: 0x24, A: 0xFF}
+	img.For(func(x, y int) xgraphics.BGRA {
+		return bg
+	})
+
+	// Border
+	borderColor := xgraphics.BGRA{R: 0x00, G: 0xF0, B: 0xFF, A: 0xFF}
+	drawBorder(img, 0, 0, winWidth, winHeight, 3, borderColor)
+
+	// Font
+	font, err := loadTTFFont()
+	if err != nil {
+		log.Printf("[UI] Render error loading font: %v", err)
+		return
+	}
+
+	// 1. Draw input box
+	inputBg := xgraphics.BGRA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF}
+	inputBorder := xgraphics.BGRA{R: 0xFF, G: 0x00, B: 0x7F, A: 0xFF}
+	drawRect(img, 25, 20, 775, 75, inputBg)
+	drawBorder(img, 25, 20, 775, 75, 1, inputBorder)
+
+	// Draw text in input box
+	inputText := c.currentText
+	textColor := xgraphics.BGRA{R: 0x00, G: 0x00, B: 0x00, A: 0xFF}
+	if inputText == "" {
+		inputText = "Type your word or sentence here..."
+		textColor = xgraphics.BGRA{R: 0x88, G: 0x88, B: 0x88, A: 0xFF}
+	}
+	_, _, _ = img.Text(40, 32, textColor, 24, font, inputText)
+
+	// 2. Draw candidates row (y = 95 to 145)
+	xOffset := 25
+	for i, cand := range c.candidates {
+		if i >= 7 {
+			break
+		}
+		candText := fmt.Sprintf("%d: %s", i+1, cand)
+		w, h := xgraphics.TextMaxExtents(font, 18, candText)
+		boxWidth := w + 30
+		boxHeight := h + 16
+
+		var boxBg, boxText xgraphics.BGRA
+		if i == c.selectedIndex {
+			boxBg = xgraphics.BGRA{R: 0xFF, G: 0x00, B: 0x7F, A: 0xFF}
+			boxText = xgraphics.BGRA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF}
+		} else {
+			boxBg = xgraphics.BGRA{R: 0x21, G: 0x25, B: 0x3B, A: 0xFF}
+			boxText = xgraphics.BGRA{R: 0xCF, G: 0xCF, B: 0xDB, A: 0xFF}
+		}
+
+		drawRect(img, xOffset, 95, xOffset+boxWidth, 95+boxHeight, boxBg)
+		drawBorder(img, xOffset, 95, xOffset+boxWidth, 95+boxHeight, 1, xgraphics.BGRA{R: 0x33, G: 0x39, B: 0x57, A: 0xFF})
+		_, _, _ = img.Text(xOffset+15, 95+8, boxText, 18, font, candText)
+
+		xOffset += boxWidth + 10
+	}
+
+	// 3. Draw sentences (y = 160 to 280)
+	yOffset := 160
+	for i, sent := range c.sentences {
+		if i >= 3 {
+			break
+		}
+		w, h := xgraphics.TextMaxExtents(font, 16, sent)
+		boxWidth := w + 30
+		boxHeight := h + 12
+
+		var boxBg, boxText xgraphics.BGRA
+		if i == c.selectedSentenceIndex {
+			boxBg = xgraphics.BGRA{R: 0x00, G: 0xF0, B: 0xFF, A: 0xFF}
+			boxText = xgraphics.BGRA{R: 0x00, G: 0x00, B: 0x00, A: 0xFF}
+		} else {
+			boxBg = xgraphics.BGRA{R: 0x1E, G: 0x1E, B: 0x2F, A: 0xFF}
+			boxText = xgraphics.BGRA{R: 0xA3, G: 0xA3, B: 0xC2, A: 0xFF}
+		}
+
+		drawRect(img, 25, yOffset, 25+boxWidth, yOffset+boxHeight, boxBg)
+		drawBorder(img, 25, yOffset, 25+boxWidth, yOffset+boxHeight, 1, xgraphics.BGRA{R: 0x2E, G: 0x2E, B: 0x4A, A: 0xFF})
+		_, _, _ = img.Text(40, yOffset+6, boxText, 16, font, sent)
+
+		yOffset += boxHeight + 8
+	}
+
+	// 4. Draw tips label
+	tipsText := "Tab: Apply word  |  Up/Down: Cycle words  |  Shift+Up/Down: Cycle sentences  |  Enter: Paste"
+	tipsColor := xgraphics.BGRA{R: 0x7B, G: 0x7B, B: 0x99, A: 0xFF}
+	_, _, _ = img.Text(25, 320, tipsColor, 12, font, tipsText)
+
+	// Draw on window
+	_ = img.CreatePixmap()
+	img.XDraw()
+	img.XExpPaint(c.win.Id, 0, 0)
+	img.Destroy()
+}
+
+func drawRect(img *xgraphics.Image, x1, y1, x2, y2 int, clr xgraphics.BGRA) {
+	for y := y1; y < y2; y++ {
+		if y < 0 || y >= img.Bounds().Max.Y {
+			continue
+		}
+		for x := x1; x < x2; x++ {
+			if x < 0 || x >= img.Bounds().Max.X {
+				continue
+			}
+			img.SetBGRA(x, y, clr)
+		}
+	}
+}
+
+func drawBorder(img *xgraphics.Image, x1, y1, x2, y2 int, thickness int, clr xgraphics.BGRA) {
+	drawRect(img, x1, y1, x2, y1+thickness, clr)
+	drawRect(img, x1, y2-thickness, x2, y2, clr)
+	drawRect(img, x1, y1, x1+thickness, y2, clr)
+	drawRect(img, x2-thickness, y1, x2, y2, clr)
 }

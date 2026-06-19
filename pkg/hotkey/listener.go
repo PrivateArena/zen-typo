@@ -94,10 +94,10 @@ static void stopRecord(char* displayName) {
     }
 }
 
-static int getCtrlKeycode(char* displayName) {
+static int getKeysymKeycode(char* displayName, KeySym keysym) {
     Display* d = XOpenDisplay(displayName);
-    if (!d) return 37; // fallback left-ctrl keycode
-    int kc = XKeysymToKeycode(d, XK_Control_L);
+    if (!d) return 0;
+    int kc = XKeysymToKeycode(d, keysym);
     XCloseDisplay(d);
     return kc;
 }
@@ -111,18 +111,30 @@ import (
 )
 
 var (
-	triggerCallback  func()
-	keyEventCallback func(keycode int, isPress bool) // raw feed for word tracker
-	ctrlKeycode      int
-	lastPressTime    time.Time
-	ctrlPressed      bool
-	mu               sync.Mutex
-	suppressUntil    time.Time // ignore synthetic XTest events during injection
+	triggerCtrlCallback  func()
+	triggerAltCallback   func()
+	triggerShiftCallback func()
+	keyEventCallback     func(keycode int, isPress bool) // raw feed for word tracker
+
+	ctrlKeycode  int
+	altKeycode   int
+	shiftKeycode int
+
+	lastCtrlPressTime  time.Time
+	lastAltPressTime   time.Time
+	lastShiftPressTime time.Time
+
+	ctrlPressed  bool
+	altPressed   bool
+	shiftPressed bool
+
+	mu            sync.Mutex
+	suppressUntil time.Time // ignore synthetic XTest events during injection
 )
 
 //export goKeyCallback
 func goKeyCallback(keycode C.int, isPress C.int) {
-	// Raw feed — called before the double-Ctrl lock so the tracker
+	// Raw feed — called before the double-modifier lock so the tracker
 	// can process every key independently. Skipped during injection.
 	if cb := keyEventCallback; cb != nil {
 		mu.Lock()
@@ -139,32 +151,36 @@ func goKeyCallback(keycode C.int, isPress C.int) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	targetKey := int(keycode) == ctrlKeycode
+	kc := int(keycode)
 
-	if targetKey {
-		if isPress == 1 {
-			if !ctrlPressed {
-				ctrlPressed = true
-				now := time.Now()
-				if now.Sub(lastPressTime) < 300*time.Millisecond {
-					if triggerCallback != nil {
-						go triggerCallback()
+	handleDoubleTap := func(targetKey bool, pressed *bool, lastPressTime *time.Time, onTrigger func()) {
+		if targetKey {
+			if isPress == 1 {
+				if !*pressed {
+					*pressed = true
+					now := time.Now()
+					if now.Sub(*lastPressTime) < 300*time.Millisecond {
+						if onTrigger != nil {
+							go onTrigger()
+						}
+						*lastPressTime = time.Time{}
+					} else {
+						*lastPressTime = now
 					}
-					// Reset to prevent triple-tap from double-firing
-					lastPressTime = time.Time{}
-				} else {
-					lastPressTime = now
 				}
+			} else {
+				*pressed = false
 			}
 		} else {
-			ctrlPressed = false
-		}
-	} else {
-		// Any other key resets the double-Ctrl sequence
-		if isPress == 1 {
-			lastPressTime = time.Time{}
+			if isPress == 1 {
+				*lastPressTime = time.Time{}
+			}
 		}
 	}
+
+	handleDoubleTap(kc == ctrlKeycode, &ctrlPressed, &lastCtrlPressTime, triggerCtrlCallback)
+	handleDoubleTap(kc == altKeycode, &altPressed, &lastAltPressTime, triggerAltCallback)
+	handleDoubleTap(kc == shiftKeycode, &shiftPressed, &lastShiftPressTime, triggerShiftCallback)
 }
 
 // SetKeyEventCallback registers a callback that receives every raw key event.
@@ -181,16 +197,20 @@ func Suppress(d time.Duration) {
 	mu.Unlock()
 }
 
-// Listen starts monitoring for double-Ctrl hotkey triggers asynchronously.
-func Listen(callback func()) {
-	triggerCallback = callback
+// Listen starts monitoring for double-Ctrl, double-Alt, and double-Shift triggers asynchronously.
+func Listen(onCtrl, onAlt, onShift func()) {
+	triggerCtrlCallback = onCtrl
+	triggerAltCallback = onAlt
+	triggerShiftCallback = onShift
 
 	displayStr := os.Getenv("DISPLAY")
 	if displayStr == "" {
 		displayStr = ":0"
 	}
 	cDisplayStr := C.CString(displayStr)
-	ctrlKeycode = int(C.getCtrlKeycode(cDisplayStr))
+	ctrlKeycode = int(C.getKeysymKeycode(cDisplayStr, C.XK_Control_L))
+	altKeycode = int(C.getKeysymKeycode(cDisplayStr, C.XK_Alt_L))
+	shiftKeycode = int(C.getKeysymKeycode(cDisplayStr, C.XK_Shift_L))
 
 	go func() {
 		defer C.free(unsafe.Pointer(cDisplayStr))

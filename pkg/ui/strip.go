@@ -1,176 +1,100 @@
 package ui
 
 import (
-	"fmt"
+	"image"
 	"log"
+	"sync"
 
-	"github.com/gotk3/gotk3/gdk"
-	"github.com/gotk3/gotk3/glib"
-	"github.com/gotk3/gotk3/gtk"
 	"github.com/jezek/xgb/xproto"
 	"github.com/jezek/xgbutil"
+	"github.com/jezek/xgbutil/xevent"
+	"github.com/jezek/xgbutil/xgraphics"
+	"github.com/jezek/xgbutil/xwindow"
 )
 
-const stripSlots = 5
-
-// StripSlot holds a single candidate chip in the ambient strip.
-type stripSlot struct {
-	box   *gtk.EventBox
-	label *gtk.Label
-}
-
-// Strip is a slim, always-visible, focus-less GTK window that shows word
-// candidates as the user types anywhere on the desktop. Clicking a chip calls
-// OnSelect with the chosen word and the length of the current fragment so the
-// caller can inject a replacement.
 type Strip struct {
-	window *gtk.Window
-	slots  [stripSlots]*stripSlot
-
+	X           *xgbutil.XUtil
+	win         *xwindow.Window
 	candidates  []string
-	fragmentLen int // length of current fragment (for ReplaceWord)
+	fragmentLen int
+	chipBoxes   []image.Rectangle
+	visible     bool
+	mu          sync.Mutex
 
-	// OnSelect is called (in a goroutine) when the user clicks a chip.
-	// word = selected candidate, fragLen = current fragment length.
 	OnSelect func(word string, fragLen int)
 }
 
-// NewStrip creates the ambient strip window. Must be called on the GTK thread.
 func NewStrip() (*Strip, error) {
-	win, err := gtk.WindowNew(gtk.WINDOW_TOPLEVEL)
-	if err != nil {
-		return nil, fmt.Errorf("strip: create window: %w", err)
-	}
-
-	win.SetTitle("zen-typo-strip")
-	win.SetDecorated(false)
-	win.SetSkipPagerHint(true)
-	win.SetSkipTaskbarHint(true)
-	win.SetKeepAbove(true)
-	win.SetAcceptFocus(false) // CRITICAL: never steal focus
-	win.SetTypeHint(gdk.WINDOW_TYPE_HINT_TOOLTIP)
-	win.SetDefaultSize(520, 44)
-
-	// Position: bottom-centre of primary screen using xproto (no GDK Screen API needed)
-	sw, sh := screenDimensions()
-	win.Move((sw-520)/2, sh-60)
-
-	// Outer box
-	outer, err := gtk.BoxNew(gtk.ORIENTATION_HORIZONTAL, 6)
+	xu, err := getX()
 	if err != nil {
 		return nil, err
 	}
-	outer.SetMarginStart(10)
-	outer.SetMarginEnd(10)
-	outer.SetMarginTop(6)
-	outer.SetMarginBottom(6)
-	win.Add(outer)
 
-	s := &Strip{window: win}
-
-	// Pre-allocate chip slots
-	for i := 0; i < stripSlots; i++ {
-		box, err := gtk.EventBoxNew()
-		if err != nil {
-			return nil, err
-		}
-		box.SetName("strip-chip")
-
-		lbl, err := gtk.LabelNew("")
-		if err != nil {
-			return nil, err
-		}
-		lbl.SetName("strip-label")
-		box.Add(lbl)
-
-		idx := i
-		box.Connect("button-press-event", func() {
-			s.handleClick(idx)
-		})
-
-		outer.PackStart(box, false, false, 0)
-		s.slots[i] = &stripSlot{box: box, label: lbl}
+	win, err := xwindow.Generate(xu)
+	if err != nil {
+		return nil, err
 	}
 
-	// Apply CSS
-	applyStripCSS(win)
+	sw, sh := screenDimensions()
+	winWidth, winHeight := 520, 44
+	x := (sw - winWidth) / 2
+	y := sh - 60
 
-	win.ShowAll()
-	// Start hidden; will show once first candidates arrive
-	win.Hide()
+	err = win.CreateChecked(
+		xu.RootWin(),
+		x, y,
+		winWidth, winHeight,
+		xproto.CwBackPixel|xproto.CwOverrideRedirect|xproto.CwEventMask,
+		0x12121C, // background color
+		1,        // override redirect
+		xproto.EventMaskExposure|xproto.EventMaskButtonPress,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	s := &Strip{
+		X:   xu,
+		win: win,
+	}
+
+	// Connect exposure handler
+	xevent.ExposeFun(func(X *xgbutil.XUtil, ev xevent.ExposeEvent) {
+		s.mu.Lock()
+		s.renderLocked()
+		s.mu.Unlock()
+	}).Connect(xu, win.Id)
+
+	// Connect button press handler (click)
+	xevent.ButtonPressFun(func(X *xgbutil.XUtil, ev xevent.ButtonPressEvent) {
+		s.mu.Lock()
+		x := int(ev.EventX)
+		s.handleMouseClick(x)
+		s.mu.Unlock()
+	}).Connect(xu, win.Id)
 
 	return s, nil
 }
 
-func applyStripCSS(win *gtk.Window) {
-	provider, err := gtk.CssProviderNew()
-	if err != nil {
-		log.Printf("[Strip] CSS provider error: %v", err)
-		return
-	}
-	css := `
-window {
-	background: rgba(18, 18, 28, 0.92);
-	border-radius: 22px;
-	border: 1px solid rgba(130, 100, 255, 0.35);
-}
-#strip-chip {
-	background: rgba(80, 60, 160, 0.35);
-	border-radius: 16px;
-	padding: 4px 14px;
-	margin: 2px;
-	transition: background 120ms ease;
-}
-#strip-chip:hover {
-	background: rgba(120, 90, 220, 0.65);
-}
-#strip-label {
-	color: #e8e0ff;
-	font-family: 'Inter', 'Roboto', sans-serif;
-	font-size: 23px;
-	font-weight: 500;
-}
-`
-	if err := provider.LoadFromData(css); err != nil {
-		log.Printf("[Strip] CSS load error: %v", err)
-		return
-	}
-	screen, err := gdk.ScreenGetDefault()
-	if err != nil {
-		return
-	}
-	gtk.AddProviderForScreen(screen, provider, gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-}
-
-// UpdateCandidates refreshes the strip chips. Safe to call from any goroutine.
 func (s *Strip) UpdateCandidates(candidates []string, fragmentLen int) {
-	glib.IdleAdd(func() {
-		s.fragmentLen = fragmentLen
-		s.candidates = candidates
-
-		for i := 0; i < stripSlots; i++ {
-			slot := s.slots[i]
-			if i < len(candidates) {
-				// Use Pango markup to style the selection number visually (e.g. pink neon index)
-				slot.label.SetMarkup(fmt.Sprintf("<span color='#ff007f'>%d</span> <span color='#e8e0ff'>%s</span>", i+1, candidates[i]))
-				slot.box.SetVisible(true)
-			} else {
-				slot.label.SetText("")
-				slot.box.SetVisible(false)
-			}
-		}
-
-		if len(candidates) > 0 {
-			s.window.ShowAll()
-		} else {
-			s.window.Hide()
-		}
-	})
+	s.mu.Lock()
+	s.candidates = candidates
+	s.fragmentLen = fragmentLen
+	if len(candidates) > 0 {
+		s.visible = true
+		s.renderLocked()
+	} else {
+		s.visible = false
+		s.win.Unmap()
+	}
+	s.mu.Unlock()
 }
 
-// Hide hides the strip. Safe to call from any goroutine.
 func (s *Strip) Hide() {
-	glib.IdleAdd(func() { s.window.Hide() })
+	s.mu.Lock()
+	s.visible = false
+	s.win.Unmap()
+	s.mu.Unlock()
 }
 
 func (s *Strip) handleClick(idx int) {
@@ -184,31 +108,94 @@ func (s *Strip) handleClick(idx int) {
 	}
 }
 
-// SelectCandidate triggers selection of candidate at idx on the GTK main thread.
-// Returns true if candidate index was valid and selected. Safe to call from any goroutine.
 func (s *Strip) SelectCandidate(idx int) bool {
-	var selected bool
-	done := make(chan struct{})
-	glib.IdleAdd(func() {
-		if idx >= 0 && idx < len(s.candidates) {
-			s.handleClick(idx)
-			selected = true
-		}
-		close(done)
-	})
-	<-done
-	return selected
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if idx >= 0 && idx < len(s.candidates) {
+		s.handleClick(idx)
+		return true
+	}
+	return false
 }
 
-// screenDimensions returns the width and height of the default X11 screen.
-// Falls back to 1920×1080 if the X connection cannot be established.
+func (s *Strip) handleMouseClick(x int) {
+	for i, r := range s.chipBoxes {
+		if x >= r.Min.X && x <= r.Max.X {
+			s.handleClick(i)
+			break
+		}
+	}
+}
+
+func (s *Strip) renderLocked() {
+	if !s.visible || len(s.candidates) == 0 {
+		s.win.Unmap()
+		return
+	}
+
+	winWidth, winHeight := 520, 44
+	img := xgraphics.New(s.X, image.Rect(0, 0, winWidth, winHeight))
+
+	// Background: rgba(18, 18, 28, 0.92)
+	bg := xgraphics.BGRA{R: 0x12, G: 0x12, B: 0x1C, A: 0xFF}
+	img.For(func(x, y int) xgraphics.BGRA {
+		return bg
+	})
+
+	// Border: rgba(130, 100, 255, 0.35)
+	borderColor := xgraphics.BGRA{R: 130, G: 100, B: 255, A: 0xFF}
+	drawBorder(img, 0, 0, winWidth, winHeight, 1, borderColor)
+
+	font, err := loadTTFFont()
+	if err != nil {
+		log.Printf("[Strip] Render error loading font: %v", err)
+		return
+	}
+
+	s.chipBoxes = nil
+	xOffset := 10
+
+	for i, cand := range s.candidates {
+		if i >= 5 {
+			break
+		}
+		chipText := cand
+		w, h := xgraphics.TextMaxExtents(font, 14, chipText)
+		boxWidth := w + 35
+		boxHeight := h + 8
+
+		rect := image.Rect(xOffset, 8, xOffset+boxWidth, 8+boxHeight)
+		s.chipBoxes = append(s.chipBoxes, rect)
+
+		// Chip background
+		chipBg := xgraphics.BGRA{R: 80, G: 60, B: 160, A: 0xFF}
+		drawRect(img, rect.Min.X, rect.Min.Y, rect.Max.X, rect.Max.Y, chipBg)
+
+		// Draw selection index in pink, candidate in light-purple
+		indexText := cand
+		pinkColor := xgraphics.BGRA{R: 0xFF, G: 0x00, B: 0x7F, A: 0xFF}
+		whiteColor := xgraphics.BGRA{R: 0xE8, G: 0xE0, B: 0xFF, A: 0xFF}
+
+		// Text: "1" in pink, " cand" in white
+		ix, _, _ := img.Text(xOffset+10, 8+4, pinkColor, 14, font, string('1'+rune(i)))
+		_, _, _ = img.Text(ix+4, 8+4, whiteColor, 14, font, " "+indexText)
+
+		xOffset += boxWidth + 6
+	}
+
+	_ = img.CreatePixmap()
+	img.XDraw()
+	img.XExpPaint(s.win.Id, 0, 0)
+	img.Destroy()
+
+	s.win.Map()
+}
+
 func screenDimensions() (int, int) {
-	xu, err := xgbutil.NewConn()
+	xu, err := getX()
 	if err != nil {
 		return 1920, 1080
 	}
-	defer xu.Conn().Close()
-
 	setup := xproto.Setup(xu.Conn())
 	if setup == nil || len(setup.Roots) == 0 {
 		return 1920, 1080

@@ -9,8 +9,10 @@
   "enable_sentence_suggestions": false,
   "max_sentence_suggestions": 1,
   "enable_autocorrect": false,
-  "enable_strip": true,
+  "enable_strip": false,
   "strip_select_modifier": "super",
+  "enable_spellcheck_hotkey": true,
+  "spellcheck_trigger_key": "alt",
   "dict_path": "/usr/share/dict/words",
   "autocorrect_ignore_apps": [
     "terminal",

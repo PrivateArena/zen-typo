@@ -92,10 +92,11 @@ func ShouldIgnoreAutocorrect(classesStr string, ignoreList []string) bool {
 	return false
 }
 
-// ReplaceWord backspaces `wordLen+1` characters (word + the space that committed
-// it) then types `replacement` followed by a space. Used by the silent
-// autocorrect feature.
-func ReplaceWord(wordLen int, replacement string) error {
+// ReplaceWord backspaces `wordLen` or `wordLen+1` characters then pastes the replacement.
+func ReplaceWord(wordLen int, replacement string, spaceTyped bool) error {
+	// Wait a moment for any physical key release to settle
+	time.Sleep(30 * time.Millisecond)
+
 	xu, err := xgbutil.NewConn()
 	if err != nil {
 		return err
@@ -124,6 +125,7 @@ func ReplaceWord(wordLen int, replacement string) error {
 	releaseKey("Shift_R")
 	releaseKey("Super_L")
 	releaseKey("Super_R")
+	c.Sync()
 
 	// Resolve backspace keycode
 	_, bsKcs, _ := keybind.ParseString(xu, "BackSpace")
@@ -132,15 +134,30 @@ func ReplaceWord(wordLen int, replacement string) error {
 		bsKC = byte(bsKcs[0])
 	}
 
-	// Backspace over: word characters + 1 space
-	total := wordLen + 1
+	// Backspace over
+	total := wordLen
+	if spaceTyped {
+		total = wordLen + 1
+	}
 	for i := 0; i < total; i++ {
 		xtest.FakeInput(c, xproto.KeyPress, bsKC, 0, 0, 0, 0, 0)
+		c.Sync()
+		time.Sleep(15 * time.Millisecond)
 		xtest.FakeInput(c, xproto.KeyRelease, bsKC, 0, 0, 0, 0, 0)
-		time.Sleep(4 * time.Millisecond)
+		c.Sync()
+		time.Sleep(15 * time.Millisecond)
 	}
 
-	// Type replacement + space using clipboard to avoid per-char keycode lookup
-	// on non-US layouts. Re-use Paste() helper which handles clipboard+Ctrl+V.
-	return Paste(replacement + " ")
+	// Wait for target window to process backspaces
+	time.Sleep(50 * time.Millisecond)
+
+	if spaceTyped {
+		return Paste(replacement + " ")
+	}
+	return Paste(replacement)
+}
+
+// TypeString types a string layout-independently by pasting it.
+func TypeString(text string) error {
+	return Paste(text)
 }

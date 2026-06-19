@@ -49,10 +49,12 @@ go run ./tools/setup_onnx/
                Double-Ctrl (<300 ms)
                      │
                      ▼
-             pkg/ui · GTK-3 Overlay ─────────────► pkg/inject · XTest Ctrl+V
-               7 pre-alloc slots                     ▲
-               3 sentence slots                      │ commit text
-                     │                               │
+             pkg/ui · Pure X11 Overlay ──────────► pkg/inject · XTest Ctrl+V
+               7 pre-alloc slots
+               3 sentence slots
+                     │
+                     │ commit text
+                     │
           ┌──────────┴──────────┐                    │
           │ onTextChanged       │ onCommit            │
           ▼                     ▼                    │
@@ -85,16 +87,12 @@ go run ./tools/setup_onnx/
 - Fires the double-Ctrl callback when two `Control_L` presses arrive within **300 ms**
   and no other key is pressed between them.
 
-### `pkg/ui` — GTK-3 Overlay
-- **Window type**: `POPUP_MENU` — bypasses window manager decoration and focus policies.
-- **Pre-allocated widget slots**: 7 candidate `EventBox`/`Label` pairs and 3 sentence
-  rows are created once at startup and **never destroyed**. Visibility toggling via
-  `Show()`/`Hide()` on the slots replaces the previous `Add()`/`Remove()` pattern that
-  caused focus-stealing on every suggestion update.
-- **Focus strategy**: `PresentWithTime(GDK_CURRENT_TIME)` + direct X11
-  `SetInputFocus` after `gtk.MainIterationDo` on every `Show()` to defeat X11's
-  focus-prevention policy.
-- **Thread safety**: all GTK mutations are marshalled through `glib.IdleAdd`.
+### `pkg/ui` — Pure X11 Overlay & Strip
+- **Window type**: Borderless `OverrideRedirect` window — bypasses window manager decoration and focus policies.
+- **Drawing**: Rendered directly via the `xgraphics` package to draw text, borders, and candidate boxes onto custom pixmaps.
+- **Fonts**: Automatically resolves standard system TTF fonts (e.g., DejaVuSans, LiberationSans) at runtime.
+- **Input handling**: Bypasses the complex GTK widget toolkit, listening to raw KeyPress and ButtonPress events directly on the X11 connection, with event dispatching handled via `xgbutil/xevent`.
+- **Performance**: 0 % CPU idle overhead, no CGo bindings for UI, and builds in a fraction of a second.
 
 ### `pkg/suggest` — Spelling + Prediction Engine
 
@@ -130,7 +128,7 @@ go build -tags onnx .
 - SQLite in **WAL** mode with `PRAGMA synchronous = NORMAL`.
 - Stores per-word frequencies and user bigram transitions.
 - All writes (`IncrementWord`, `IncrementBigram`) run in background goroutines —
-  disk I/O never blocks a GTK frame.
+  disk I/O never blocks a UI frame.
 - Loaded at startup into the spelling `Engine` (`UpdateUserFrequency`) and into
   the active `Predictor` (`AddUserTransition`) for personalised ranking.
 
@@ -172,7 +170,7 @@ onTextChanged(text)
 
  └─ if EnableSentenceSuggestions && words > 0
        goroutine → Predictor.PredictSentences(words)
-                 → glib.IdleAdd → UpdateSentences()   [seq-guarded]
+                  → UpdateSentences()   [seq-guarded]
 ```
 
 ---
@@ -203,8 +201,7 @@ Resolution order for `habit.db` (and all data files):
 
 | Package | Role |
 |---|---|
-| `gotk3/gotk3` | GTK-3 UI (event-driven, 0 % CPU idle) |
-| `jezek/xgb` + `xgbutil` | X11 protocol (XTest key injection, focus management) |
+| `jezek/xgb` + `xgbutil` | X11 protocol (UI window, drawing, text, XTest injection) |
 | `mattn/go-sqlite3` | SQLite driver (habit.db + ngrams.db) |
 | `atotto/clipboard` | System clipboard write |
 | `yalue/onnxruntime_go` | ONNX Runtime binding (build tag `onnx` only) |
@@ -217,7 +214,7 @@ Resolution order for `habit.db` (and all data files):
 | Decision | Why |
 |---|---|
 | XRecord over `xdotool`/evdev polling | Kernel-fd blocking = true 0 % CPU idle |
-| Pre-allocated GTK slots (never `Destroy`) | Eliminates focus-theft caused by widget lifecycle |
+| Pure X11 OverrideRedirect Tooltips | 100% CGo-free UI compile, instant build, extremely lightweight |
 | `Predictor` interface (builtin/ngram/onnx) | Swappable backends without touching UI or learning code |
 | SQLite WAL + async goroutines | Disk writes never add latency to suggestion rendering |
 | Build tag `onnx` gating CGo | Standard `go build .` works with zero ONNX runtime on the host |

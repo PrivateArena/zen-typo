@@ -11,7 +11,7 @@ import (
 
 	"sync"
 
-	"github.com/gotk3/gotk3/glib"
+
 	"zen-typo/pkg/config"
 	"zen-typo/pkg/db"
 	"zen-typo/pkg/hotkey"
@@ -73,6 +73,9 @@ func main() {
 	// 5. Hydrate spelling + predictor with learned habits from habit DB
 	hydrateFromDB()
 
+	// Train fuzzy spelling engine in the background
+	go suggestEngine.TrainFuzzyModel()
+
 	// 6. Initialize UI
 	uiCtrl, err = ui.Start(onTextChanged, func(text string) { onCommit(text, false) }, onHide)
 	if err != nil {
@@ -109,7 +112,7 @@ func main() {
 			}
 		}
 	}
-	hotkey.Listen(func() {
+	onCtrl := func() {
 		if uiCtrl.IsVisible() {
 			log.Println("Double-Ctrl detected while visible! Committing current entry...")
 			text := uiCtrl.GetText()
@@ -125,7 +128,57 @@ func main() {
 			}
 			uiCtrl.Show()
 		}
-	})
+	}
+
+	onSpellcheckFix := func() {
+		if tracker == nil {
+			return
+		}
+		word, spaceTyped := tracker.LastWord()
+		if word == "" {
+			log.Println("[SpellcheckHotkey] No word found to spellcheck")
+			return
+		}
+
+		// Spellcheck the word using fuzzy engine
+		correction, found := suggestEngine.FuzzyCorrection(word)
+		if !found {
+			log.Printf("[SpellcheckHotkey] No correction found for %q", word)
+			return
+		}
+
+		// Match casing of the original word
+		correction = suggest.MatchCasing(word, correction)
+
+		log.Printf("[SpellcheckHotkey] Correcting %q → %q (spaceTyped=%t)", word, correction, spaceTyped)
+
+		// Suppress event listener to prevent infinite loops during injection
+		hotkey.Suppress(250 * time.Millisecond)
+
+		// Reset word tracker to clean state
+		tracker.Reset()
+
+		// Perform replacement asynchronously to keep typing thread responsive
+		go func() {
+			if err := inject.ReplaceWord(len([]rune(word)), correction, spaceTyped); err != nil {
+				log.Printf("[SpellcheckHotkey] Inject error: %v", err)
+			}
+		}()
+	}
+
+	var onAlt, onShift func()
+	if cfg.EnableSpellcheckHotkey {
+		switch cfg.SpellcheckTriggerKey {
+		case "alt":
+			onAlt = onSpellcheckFix
+		case "shift":
+			onShift = onSpellcheckFix
+		case "ctrl":
+			onCtrl = onSpellcheckFix
+		}
+	}
+
+	hotkey.Listen(onCtrl, onAlt, onShift)
 	defer hotkey.Stop()
 
 	// Handle OS shutdown signals gracefully
@@ -296,9 +349,7 @@ func onTextChanged(text string) {
 			sentenceSeqMu.Unlock()
 
 			if isLatest {
-				glib.IdleAdd(func() {
-					uiCtrl.UpdateSentences(sugs)
-				})
+				uiCtrl.UpdateSentences(sugs)
 			}
 		}(words, seq)
 	} else {

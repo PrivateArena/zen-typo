@@ -8,6 +8,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/sajari/fuzzy"
 )
 
 type WordInfo struct {
@@ -22,6 +25,7 @@ type Engine struct {
 	deletes     map[string][]string
 	maxDistance int
 	systemDict  map[string]bool
+	fuzzyModel  *fuzzy.Model
 }
 
 var qwertyCoords = map[rune][2]float64{
@@ -31,11 +35,15 @@ var qwertyCoords = map[rune][2]float64{
 }
 
 func NewEngine() *Engine {
+	fm := fuzzy.NewModel()
+	fm.SetDepth(2)
+	fm.SetThreshold(1)
 	return &Engine{
 		dictionary:  make(map[string]*WordInfo),
 		deletes:     make(map[string][]string),
 		maxDistance: 2,
 		systemDict:  make(map[string]bool),
+		fuzzyModel:  fm,
 	}
 }
 
@@ -52,6 +60,10 @@ func (e *Engine) AddWord(word string, freq int64) {
 	word = strings.ToLower(word)
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	if e.fuzzyModel != nil {
+		e.fuzzyModel.TrainWord(word)
+	}
 
 	info, exists := e.dictionary[word]
 	if exists {
@@ -74,6 +86,10 @@ func (e *Engine) UpdateUserFrequency(word string, inc int64) {
 	word = strings.ToLower(word)
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	if e.fuzzyModel != nil {
+		e.fuzzyModel.TrainWord(word)
+	}
 
 	info, exists := e.dictionary[word]
 	if exists {
@@ -365,4 +381,84 @@ func minFloat(a, b, c float64) float64 {
 		return b
 	}
 	return c
+}
+
+// TrainFuzzyModel trains the fuzzy model with all current dictionary and system dictionary words.
+// It is expected to be run in a background goroutine.
+func (e *Engine) TrainFuzzyModel() {
+	e.mu.Lock()
+	var words []string
+	for w := range e.dictionary {
+		words = append(words, w)
+	}
+	for w := range e.systemDict {
+		words = append(words, w)
+	}
+	e.mu.Unlock()
+
+	log.Printf("[Engine] Training fuzzy model with %d words in background...", len(words))
+	start := time.Now()
+	if e.fuzzyModel != nil {
+		e.fuzzyModel.Train(words)
+	}
+	log.Printf("[Engine] Fuzzy model training complete (took %v)", time.Since(start))
+}
+
+// FuzzyCorrection returns the closest match for the input word using Sajari Fuzzy.
+// Returns ("", false) if the word is already correct, too short, or no correction is found.
+func (e *Engine) FuzzyCorrection(input string) (string, bool) {
+	input = strings.TrimSpace(strings.ToLower(input))
+	if len(input) < 3 {
+		return "", false
+	}
+
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	// If it's already a valid word, do not correct
+	if _, exists := e.dictionary[input]; exists {
+		return "", false
+	}
+	if e.systemDict != nil && e.systemDict[input] {
+		return "", false
+	}
+
+	if e.fuzzyModel == nil {
+		return "", false
+	}
+
+	suggestions := e.fuzzyModel.Suggestions(input, true)
+	if len(suggestions) > 0 {
+		return suggestions[0], true
+	}
+	return "", false
+}
+
+// MatchCasing matches the casing of the original word (UPPERCASE or Title Case) and applies it to correction.
+func MatchCasing(original, correction string) string {
+	if len(original) == 0 || len(correction) == 0 {
+		return correction
+	}
+	// Check if all letters are uppercase
+	isAllUpper := true
+	hasLetter := false
+	for _, r := range original {
+		if r >= 'a' && r <= 'z' {
+			isAllUpper = false
+			break
+		}
+		if r >= 'A' && r <= 'Z' {
+			hasLetter = true
+		}
+	}
+	if isAllUpper && hasLetter {
+		return strings.ToUpper(correction)
+	}
+	// Check if title case
+	firstRune := []rune(original)[0]
+	if firstRune >= 'A' && firstRune <= 'Z' {
+		corrRunes := []rune(correction)
+		return strings.ToUpper(string(corrRunes[0])) + string(corrRunes[1:])
+	}
+	return correction
 }

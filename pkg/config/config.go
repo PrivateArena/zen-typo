@@ -70,6 +70,12 @@ type Config struct {
 
 	// LazyOnnx loads the ONNX predictor in the background so startup is instant.
 	LazyOnnx bool `json:"lazy_onnx"`
+
+	// EnableSpellcheckHotkey enables a dedicated hotkey to spellcheck and fix the last typed word.
+	EnableSpellcheckHotkey bool `json:"enable_spellcheck_hotkey"`
+
+	// SpellcheckTriggerKey defines which modifier key triggers the spellcheck hotkey on double-press: "alt" | "shift" | "ctrl"
+	SpellcheckTriggerKey string `json:"spellcheck_trigger_key"`
 }
 
 // Default returns a config with sensible out-of-the-box values.
@@ -91,6 +97,8 @@ func Default() *Config {
 		AutocorrectIgnoreApps:     []string{"terminal", "kitty", "alacritty", "konsole"},
 		CustomWords:               []string{},
 		LazyOnnx:                  true,
+		EnableSpellcheckHotkey:    true,
+		SpellcheckTriggerKey:      "alt",
 	}
 }
 

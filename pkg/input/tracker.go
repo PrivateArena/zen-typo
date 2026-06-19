@@ -181,6 +181,20 @@ func (t *WordTracker) Fragment() string {
 	return t.fragment
 }
 
+// LastWord returns the current active fragment if it's non-empty.
+// If it is empty, it returns the last committed word, and a boolean indicating if it was already committed (space typed).
+func (t *WordTracker) LastWord() (word string, spaceTyped bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.fragment != "" {
+		return t.fragment, false
+	}
+	if len(t.words) > 0 {
+		return t.words[len(t.words)-1], true
+	}
+	return "", false
+}
+
 func (t *WordTracker) notify() {
 	if cb := t.OnFragment; cb != nil {
 		frag := t.fragment
