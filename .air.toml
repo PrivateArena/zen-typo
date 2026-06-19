@@ -1,0 +1,31 @@
+# .air.toml
+# Config file for Air (https://github.com/air-verse/air)
+
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -tags onnx -o ./zen-typo ."
+  bin = "./zen-typo"
+  full_bin = "sh -c 'LD_LIBRARY_PATH=\".:$LD_LIBRARY_PATH\" ./zen-typo'"
+  delay = 1000
+  exclude_dir = ["tmp", ".git", ".zenmcp"]
+  exclude_file = []
+  exclude_regex = ["_test.go"]
+  include_ext = ["go", "json", "yaml", "yml"]
+  kill_delay = "0s"
+  send_interrupt = false
+  stop_on_error = true
+
+[color]
+  app = ""
+  build = "yellow"
+  main = "cyan"
+  runner = "green"
+  watcher = "magenta"
+
+[log]
+  time = false
+
+[misc]
+  clean_on_exit = false

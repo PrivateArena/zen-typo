@@ -1,0 +1,23 @@
+{
+  "engine": "builtin",
+  "ngram_db_path": "ngrams.db",
+  "onnx_model_path": "model/distilgpt2.onnx",
+  "onnx_vocab_path": "model/vocab.json",
+  "onnx_merges_path": "model/merges.txt",
+  "max_suggestions": 5,
+  "enable_sentence_suggestions": true,
+  "max_sentence_suggestions": 3,
+  "enable_strip": true,
+  "strip_select_modifier": "alt",
+  "enable_autocorrect": true,
+  "autocorrect_max_dist": 1,
+  "dict_path": "/usr/share/dict/words",
+  "autocorrect_ignore_apps": [
+    "terminal",
+    "kitty",
+    "alacritty",
+    "konsole"
+  ],
+  "custom_words": [],
+  "lazy_onnx": true
+}

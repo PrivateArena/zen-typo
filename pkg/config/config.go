@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Engine constants for the "engine" config field.
@@ -146,30 +147,61 @@ func save(path string, cfg *Config) error {
 	return os.WriteFile(path, data, 0644)
 }
 
+func containsTemp(path string) bool {
+	lower := strings.ToLower(path)
+	return strings.Contains(lower, "/tmp") || strings.Contains(lower, "temp") || strings.Contains(lower, "go-build")
+}
+
 // resolveConfigPath returns the path to config.json, preferring the
-// executable directory (portable mode) over the working directory.
+// current working directory first, and then the executable directory (excluding temp/build dirs).
 func resolveConfigPath() string {
-	exe, err := os.Executable()
+	// 1. Try CWD first
+	cwd, err := os.Getwd()
 	if err == nil {
+		p := filepath.Join(cwd, "config.json")
+		if _, err2 := os.Stat(p); err2 == nil {
+			return p
+		}
+	}
+
+	// 2. Try Executable dir (excluding temporary build paths)
+	exe, err := os.Executable()
+	if err == nil && !containsTemp(exe) {
 		p := filepath.Join(filepath.Dir(exe), "config.json")
 		if _, err2 := os.Stat(p); err2 == nil {
-			return p // found next to executable
+			return p
 		}
-		// Will be created next to executable (portable mode)
-		return p
+	}
+
+	// 3. Fallback to CWD default
+	if err == nil {
+		return filepath.Join(cwd, "config.json")
 	}
 	return "config.json"
 }
 
-// ResolvePath resolves a config path relative to the executable directory
-// if it's not already absolute.
+// ResolvePath resolves a config path relative to the config file directory
+// if it's not already absolute, skipping temp directories.
 func (c *Config) ResolvePath(p string) string {
 	if filepath.IsAbs(p) {
 		return p
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		return p
+	// Try CWD first if it contains the target file
+	cwd, err := os.Getwd()
+	if err == nil {
+		path := filepath.Join(cwd, p)
+		if _, err2 := os.Stat(path); err2 == nil {
+			return path
+		}
 	}
-	return filepath.Join(filepath.Dir(exe), p)
+
+	exe, err := os.Executable()
+	if err == nil && !containsTemp(exe) {
+		return filepath.Join(filepath.Dir(exe), p)
+	}
+
+	if err == nil {
+		return filepath.Join(cwd, p)
+	}
+	return p
 }

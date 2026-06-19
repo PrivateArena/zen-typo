@@ -1,0 +1,273 @@
+package inject
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/jezek/xgb/xproto"
+	"github.com/jezek/xgb/xtest"
+	"github.com/jezek/xgbutil"
+	"github.com/jezek/xgbutil/keybind"
+)
+
+func getAtom(xu *xgbutil.XUtil, name string) (xproto.Atom, error) {
+	reply, err := xproto.InternAtom(xu.Conn(), false, uint16(len(name)), name).Reply()
+	if err != nil {
+		return 0, err
+	}
+	return reply.Atom, nil
+}
+
+// GetActiveWindowClass queries X11 for the current active window's class name(s).
+func GetActiveWindowClass() (string, error) {
+	xu, err := xgbutil.NewConn()
+	if err != nil {
+		return "", err
+	}
+	defer xu.Conn().Close()
+
+	setup := xproto.Setup(xu.Conn())
+	if setup == nil || len(setup.Roots) == 0 {
+		return "", fmt.Errorf("no roots in X setup")
+	}
+	rootWin := setup.DefaultScreen(xu.Conn()).Root
+
+	activeWinAtom, err := getAtom(xu, "_NET_ACTIVE_WINDOW")
+	if err != nil {
+		return "", err
+	}
+	reply, err := xproto.GetProperty(xu.Conn(), false, rootWin, activeWinAtom, xproto.GetPropertyTypeAny, 0, 1).Reply()
+	if err != nil {
+		return "", err
+	}
+	if reply == nil || reply.Format != 32 || len(reply.Value) < 4 {
+		return "", fmt.Errorf("invalid _NET_ACTIVE_WINDOW property")
+	}
+
+	winID := xproto.Window(uint32(reply.Value[0]) | uint32(reply.Value[1])<<8 | uint32(reply.Value[2])<<16 | uint32(reply.Value[3])<<24)
+	if winID == 0 {
+		return "", fmt.Errorf("no active window")
+	}
+
+	wmClassAtom, err := getAtom(xu, "WM_CLASS")
+	if err != nil {
+		return "", err
+	}
+	classReply, err := xproto.GetProperty(xu.Conn(), false, winID, wmClassAtom, xproto.GetPropertyTypeAny, 0, 100).Reply()
+	if err != nil {
+		return "", err
+	}
+	if classReply == nil || len(classReply.Value) == 0 {
+		return "", fmt.Errorf("invalid WM_CLASS property")
+	}
+
+	// WM_CLASS contains null-terminated strings
+	// Format is typically: instance_name \0 class_name \0
+	parts := strings.Split(string(classReply.Value), "\x00")
+	var classes []string
+	for _, p := range parts {
+		if p != "" {
+			classes = append(classes, p)
+		}
+	}
+	return strings.Join(classes, ", "), nil
+}
+
+// ShouldIgnoreAutocorrect checks if any active window class name matches the ignore list.
+func ShouldIgnoreAutocorrect(classesStr string, ignoreList []string) bool {
+	if len(ignoreList) == 0 {
+		return false
+	}
+	classes := strings.Split(classesStr, ", ")
+	for _, cls := range classes {
+		clsLower := strings.ToLower(strings.TrimSpace(cls))
+		for _, ignorePattern := range ignoreList {
+			ignoreLower := strings.ToLower(strings.TrimSpace(ignorePattern))
+			if strings.Contains(clsLower, ignoreLower) || strings.Contains(ignoreLower, clsLower) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+var charToKeySym = map[rune]string{
+	' ':  "space",
+	'\n': "Return",
+	'\t': "Tab",
+	'!':  "exclam",
+	'"':  "quotedbl",
+	'#':  "numbersign",
+	'$':  "dollar",
+	'%':  "percent",
+	'&':  "ampersand",
+	'\'': "apostrophe",
+	'(':  "parenleft",
+	')':  "parenright",
+	'*':  "asterisk",
+	'+':  "plus",
+	',':  "comma",
+	'-':  "minus",
+	'.':  "period",
+	'/':  "slash",
+	':':  "colon",
+	';':  "semicolon",
+	'<':  "less",
+	'=':  "equal",
+	'>':  "greater",
+	'?':  "question",
+	'@':  "at",
+	'[':  "bracketleft",
+	'\\': "backslash",
+	']':  "bracketright",
+	'^':  "asciicircum",
+	'_':  "underscore",
+	'`':  "grave",
+	'{':  "braceleft",
+	'|':  "bar",
+	'}':  "braceright",
+	'~':  "asciitilde",
+}
+
+func typeStringInner(xu *xgbutil.XUtil, text string) error {
+	c := xu.Conn()
+	_, shiftKcs, _ := keybind.ParseString(xu, "Shift_L")
+	var shiftKC byte = 50
+	if len(shiftKcs) > 0 {
+		shiftKC = byte(shiftKcs[0])
+	}
+
+	for _, r := range text {
+		sym := string(r)
+		if s, ok := charToKeySym[r]; ok {
+			sym = s
+		}
+
+		mods, kcs, err := keybind.ParseString(xu, sym)
+		if err != nil || len(kcs) == 0 {
+			continue
+		}
+		kc := byte(kcs[0])
+
+		needShift := (mods & xproto.ModMaskShift) != 0
+
+		if needShift {
+			xtest.FakeInput(c, xproto.KeyPress, shiftKC, 0, 0, 0, 0, 0)
+			c.Sync()
+			time.Sleep(5 * time.Millisecond)
+		}
+
+		xtest.FakeInput(c, xproto.KeyPress, kc, 0, 0, 0, 0, 0)
+		c.Sync()
+		time.Sleep(5 * time.Millisecond)
+
+		xtest.FakeInput(c, xproto.KeyRelease, kc, 0, 0, 0, 0, 0)
+		c.Sync()
+		time.Sleep(5 * time.Millisecond)
+
+		if needShift {
+			xtest.FakeInput(c, xproto.KeyRelease, shiftKC, 0, 0, 0, 0, 0)
+			c.Sync()
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	return nil
+}
+
+// TypeString types a string layout-independently using native keyboard simulation.
+func TypeString(text string) error {
+	xu, err := xgbutil.NewConn()
+	if err != nil {
+		return err
+	}
+	defer xu.Conn().Close()
+
+	keybind.Initialize(xu)
+	if err := xtest.Init(xu.Conn()); err != nil {
+		return err
+	}
+	c := xu.Conn()
+
+	// Release any physically held modifiers to prevent keystroke contamination
+	releaseKey := func(name string) {
+		if _, kcs, err := keybind.ParseString(xu, name); err == nil && len(kcs) > 0 {
+			for _, kc := range kcs {
+				xtest.FakeInput(c, xproto.KeyRelease, byte(kc), 0, 0, 0, 0, 0)
+			}
+		}
+	}
+	releaseKey("Alt_L")
+	releaseKey("Alt_R")
+	releaseKey("Control_L")
+	releaseKey("Control_R")
+	releaseKey("Shift_L")
+	releaseKey("Shift_R")
+	releaseKey("Super_L")
+	releaseKey("Super_R")
+	c.Sync()
+
+	return typeStringInner(xu, text)
+}
+
+// ReplaceWord backspaces layout-independently and types the replacement layout-independently.
+func ReplaceWord(wordLen int, replacement string, spaceTyped bool) error {
+	// Wait a moment for any physical key release to settle
+	time.Sleep(30 * time.Millisecond)
+
+	xu, err := xgbutil.NewConn()
+	if err != nil {
+		return err
+	}
+	defer xu.Conn().Close()
+
+	keybind.Initialize(xu)
+	if err := xtest.Init(xu.Conn()); err != nil {
+		return err
+	}
+	c := xu.Conn()
+
+	// Release any physically held modifiers to prevent keystroke contamination during simulation
+	releaseKey := func(name string) {
+		if _, kcs, err := keybind.ParseString(xu, name); err == nil && len(kcs) > 0 {
+			for _, kc := range kcs {
+				xtest.FakeInput(c, xproto.KeyRelease, byte(kc), 0, 0, 0, 0, 0)
+			}
+		}
+	}
+	releaseKey("Alt_L")
+	releaseKey("Alt_R")
+	releaseKey("Control_L")
+	releaseKey("Control_R")
+	releaseKey("Shift_L")
+	releaseKey("Shift_R")
+	releaseKey("Super_L")
+	releaseKey("Super_R")
+	c.Sync()
+
+	// Resolve backspace keycode
+	_, bsKcs, _ := keybind.ParseString(xu, "BackSpace")
+	var bsKC byte = 22
+	if len(bsKcs) > 0 {
+		bsKC = byte(bsKcs[0])
+	}
+
+	// Backspace over
+	total := wordLen
+	if spaceTyped {
+		total = wordLen + 1
+	}
+	for i := 0; i < total; i++ {
+		xtest.FakeInput(c, xproto.KeyPress, bsKC, 0, 0, 0, 0, 0)
+		c.Sync()
+		time.Sleep(15 * time.Millisecond)
+		xtest.FakeInput(c, xproto.KeyRelease, bsKC, 0, 0, 0, 0, 0)
+		c.Sync()
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	// Wait for target window to process backspaces
+	time.Sleep(50 * time.Millisecond)
+
+	return typeStringInner(xu, replacement+" ")
+}

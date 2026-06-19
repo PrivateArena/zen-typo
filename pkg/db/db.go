@@ -205,3 +205,16 @@ func (d *Database) LoadBigrams() (map[string]map[string]int64, error) {
 	}
 	return bigrams, nil
 }
+
+func (d *Database) ResetHabits() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if _, err := d.db.Exec("DELETE FROM word_frequency"); err != nil {
+		return err
+	}
+	if _, err := d.db.Exec("DELETE FROM bigrams"); err != nil {
+		return err
+	}
+	return nil
+}

@@ -98,9 +98,9 @@ func main() {
 			log.Printf("[Strip] Failed to create strip: %v", err)
 		} else {
 			strip.OnSelect = func(word string, fragLen int) {
-				hotkey.Suppress(400 * time.Millisecond)
+				hotkey.Suppress(250 * time.Millisecond)
 				tracker.Reset()
-				if err := inject.ReplaceWord(fragLen, word); err != nil {
+				if err := inject.ReplaceWord(fragLen, word, false); err != nil {
 					log.Printf("[Strip] Inject error: %v", err)
 				}
 			}
@@ -257,12 +257,12 @@ func onTrackerSpace(word string, words []string) {
 		return
 	}
 	log.Printf("[Autocorrect] %q → %q (dist=%.1f)", word, correction, dist)
-	hotkey.Suppress(500 * time.Millisecond)
+	hotkey.Suppress(250 * time.Millisecond)
 	if tracker != nil {
 		tracker.Reset()
 	}
 	go func() {
-		if err := inject.ReplaceWord(len([]rune(word)), correction); err != nil {
+		if err := inject.ReplaceWord(len([]rune(word)), correction, true); err != nil {
 			log.Printf("[Autocorrect] Inject error: %v", err)
 		}
 	}()
@@ -406,7 +406,7 @@ func onCommit(text string, acceptedSuggestion bool) {
 	// Inject text back into the previously-active window
 	go func() {
 		time.Sleep(100 * time.Millisecond)
-		if err := inject.Paste(text + " "); err != nil {
+		if err := inject.TypeString(text + " "); err != nil {
 			log.Printf("Text injection error: %v", err)
 		}
 	}()

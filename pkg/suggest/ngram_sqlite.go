@@ -6,6 +6,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -23,6 +24,9 @@ type SQLitePredictor struct {
 
 	stmtBigram  *sql.Stmt
 	stmtTrigram *sql.Stmt
+
+	userBigrams   map[string]map[string]int64
+	userBigramsMu sync.RWMutex
 }
 
 // NewSQLitePredictor opens the corpus DB at dbPath.
@@ -66,6 +70,7 @@ func NewSQLitePredictor(dbPath string) (*SQLitePredictor, error) {
 		builtin:     builtin,
 		stmtBigram:  stmtBigram,
 		stmtTrigram: stmtTrigram,
+		userBigrams: make(map[string]map[string]int64),
 	}, nil
 }
 
@@ -83,6 +88,15 @@ func (p *SQLitePredictor) PredictNextContext(words []string) []string {
 
 	scores := make(map[string]int64)
 	lastWord := strings.ToLower(strings.TrimSpace(words[len(words)-1]))
+
+	// 0. User habit overrides (highest priority: multiplier 10000)
+	p.userBigramsMu.RLock()
+	if nexts, exists := p.userBigrams[lastWord]; exists {
+		for next, freq := range nexts {
+			scores[next] += freq * 10000
+		}
+	}
+	p.userBigramsMu.RUnlock()
 
 	// 1. Trigram query (higher weight ×3)
 	if len(words) >= 2 {
@@ -154,6 +168,18 @@ func (p *SQLitePredictor) Close() error {
 	return nil
 }
 
+func (p *SQLitePredictor) AddUserTransition(w1, w2 string, freq int64) {
+	p.userBigramsMu.Lock()
+	defer p.userBigramsMu.Unlock()
+
+	w1 = strings.ToLower(strings.TrimSpace(w1))
+	w2 = strings.ToLower(strings.TrimSpace(w2))
+	if _, exists := p.userBigrams[w1]; !exists {
+		p.userBigrams[w1] = make(map[string]int64)
+	}
+	p.userBigrams[w1][w2] += freq
+}
+
 // rankTop5 sorts score map and returns top 5 word strings.
 func rankTop5(scores map[string]int64) []string {
 	type entry struct {
@@ -190,7 +216,7 @@ func (p *BuiltinPredictor) PredictSentences(words []string) []string {
 	return nil
 }
 func (p *BuiltinPredictor) Starters() []string { return p.engine.Starters() }
-func (p *BuiltinPredictor) Close() error        { return nil }
+func (p *BuiltinPredictor) Close() error       { return nil }
 
 func LoadCorpusWordFrequencies(dbPath string, engine *Engine) error {
 	db, err := sql.Open("sqlite3", dbPath+"?mode=ro&_journal=OFF&_sync=OFF&cache=shared")

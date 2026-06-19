@@ -68,3 +68,25 @@ func (lp *LazyPredictor) IsReady() bool {
 	defer lp.mu.RUnlock()
 	return lp.primary != nil
 }
+
+func (lp *LazyPredictor) AddUserTransition(word, next string, weight int64) {
+	lp.mu.Lock()
+	defer lp.mu.Unlock()
+
+	// Helper function to forward transition to a predictor
+	forward := func(p Predictor) {
+		if p == nil {
+			return
+		}
+		if bp, ok := p.(interface {
+			AddUserTransition(word, next string, weight int64)
+		}); ok {
+			bp.AddUserTransition(word, next, weight)
+		}
+	}
+
+	forward(lp.current)
+	if lp.primary != lp.current {
+		forward(lp.primary)
+	}
+}
