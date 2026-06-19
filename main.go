@@ -112,14 +112,14 @@ func main() {
 			}
 		}
 	}
-	onCtrl := func() {
+	onOverlayTrigger := func() {
 		if uiCtrl.IsVisible() {
-			log.Println("Double-Ctrl detected while visible! Committing current entry...")
+			log.Printf("Double-%s detected while visible! Committing current entry...", cfg.OverlayTriggerKey)
 			text := uiCtrl.GetText()
 			uiCtrl.Hide()
 			onCommit(text, false)
 		} else {
-			log.Println("Double-Ctrl detected! Showing overlay...")
+			log.Printf("Double-%s detected! Showing overlay...", cfg.OverlayTriggerKey)
 			if tracker != nil {
 				tracker.Reset() // don't mix ambient fragment with overlay input
 			}
@@ -140,6 +140,9 @@ func main() {
 			return
 		}
 
+		// Always reset word tracker to clean state since spellcheck was triggered for this word
+		tracker.Reset()
+
 		// Spellcheck the word using fuzzy engine
 		correction, found := suggestEngine.FuzzyCorrection(word)
 		if !found {
@@ -155,9 +158,6 @@ func main() {
 		// Suppress event listener to prevent infinite loops during injection
 		hotkey.Suppress(250 * time.Millisecond)
 
-		// Reset word tracker to clean state
-		tracker.Reset()
-
 		// Perform replacement asynchronously to keep typing thread responsive
 		go func() {
 			if err := inject.ReplaceWord(len([]rune(word)), correction, spaceTyped); err != nil {
@@ -166,15 +166,29 @@ func main() {
 		}()
 	}
 
-	var onAlt, onShift func()
+	var onCtrl, onAlt, onShift func()
+
+	// 1. Map overlay hotkey if enabled
+	if cfg.EnableOverlayHotkey {
+		switch strings.ToLower(cfg.OverlayTriggerKey) {
+		case "ctrl":
+			onCtrl = onOverlayTrigger
+		case "alt":
+			onAlt = onOverlayTrigger
+		case "shift":
+			onShift = onOverlayTrigger
+		}
+	}
+
+	// 2. Map spellcheck hotkey if enabled, overwriting if collision (spellcheck takes priority)
 	if cfg.EnableSpellcheckHotkey {
-		switch cfg.SpellcheckTriggerKey {
+		switch strings.ToLower(cfg.SpellcheckTriggerKey) {
+		case "ctrl":
+			onCtrl = onSpellcheckFix
 		case "alt":
 			onAlt = onSpellcheckFix
 		case "shift":
 			onShift = onSpellcheckFix
-		case "ctrl":
-			onCtrl = onSpellcheckFix
 		}
 	}
 

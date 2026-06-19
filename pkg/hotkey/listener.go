@@ -20,6 +20,8 @@ static void recordCallback(XPointer userData, XRecordInterceptData* data) {
             goKeyCallback(keycode, 1);
         } else if (type == KeyRelease) {
             goKeyCallback(keycode, 0);
+        } else if (type == ButtonPress) {
+            goKeyCallback(-1, 1);
         }
     }
     XRecordFreeData(data);
@@ -48,7 +50,7 @@ static int startRecord(char* displayName) {
     }
 
     range->device_events.first = KeyPress;
-    range->device_events.last  = KeyRelease;
+    range->device_events.last  = ButtonRelease;
 
     XRecordClientSpec spec = XRecordAllClients;
     ctx = XRecordCreateContext(ctrlDisplay, 0, &spec, 1, &range, 1);
@@ -141,8 +143,8 @@ func goKeyCallback(keycode C.int, isPress C.int) {
 		suppressed := time.Now().Before(suppressUntil)
 		mu.Unlock()
 		kc := int(keycode)
-		// Always allow modifier keys to bypass suppression so their state in the tracker stays in sync
-		isModifier := kc == 37 || kc == 105 || kc == 50 || kc == 62 || kc == 64 || kc == 108 || kc == 133 || kc == 134
+		// Always allow modifier keys and mouse events to bypass suppression so the tracker stays in sync
+		isModifier := kc == -1 || kc == 37 || kc == 105 || kc == 50 || kc == 62 || kc == 64 || kc == 108 || kc == 133 || kc == 134
 		if !suppressed || isModifier {
 			cb(kc, isPress == 1)
 		}

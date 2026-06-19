@@ -61,23 +61,26 @@ func (e *Engine) AddWord(word string, freq int64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if e.fuzzyModel != nil {
-		e.fuzzyModel.TrainWord(word)
-	}
-
 	info, exists := e.dictionary[word]
 	if exists {
 		info.Frequency = freq
-		return
+	} else {
+		info = &WordInfo{Word: word, Frequency: freq}
+		e.dictionary[word] = info
+
+		// Generate deletions for SymSpell
+		deletes := e.getDeletes(word, e.maxDistance)
+		for del := range deletes {
+			e.deletes[del] = append(e.deletes[del], word)
+		}
 	}
 
-	info = &WordInfo{Word: word, Frequency: freq}
-	e.dictionary[word] = info
-
-	// Generate deletions for SymSpell
-	deletes := e.getDeletes(word, e.maxDistance)
-	for del := range deletes {
-		e.deletes[del] = append(e.deletes[del], word)
+	if e.fuzzyModel != nil {
+		count := int(info.Frequency + info.UserFreq)
+		if count < 1 {
+			count = 1
+		}
+		e.fuzzyModel.SetCount(word, count, true)
 	}
 }
 
@@ -86,10 +89,6 @@ func (e *Engine) UpdateUserFrequency(word string, inc int64) {
 	word = strings.ToLower(word)
 	e.mu.Lock()
 	defer e.mu.Unlock()
-
-	if e.fuzzyModel != nil {
-		e.fuzzyModel.TrainWord(word)
-	}
 
 	info, exists := e.dictionary[word]
 	if exists {
@@ -101,6 +100,14 @@ func (e *Engine) UpdateUserFrequency(word string, inc int64) {
 		for del := range deletes {
 			e.deletes[del] = append(e.deletes[del], word)
 		}
+	}
+
+	if e.fuzzyModel != nil {
+		count := int(info.Frequency + info.UserFreq)
+		if count < 1 {
+			count = 1
+		}
+		e.fuzzyModel.SetCount(word, count, true)
 	}
 }
 
@@ -387,19 +394,35 @@ func minFloat(a, b, c float64) float64 {
 // It is expected to be run in a background goroutine.
 func (e *Engine) TrainFuzzyModel() {
 	e.mu.Lock()
-	var words []string
-	for w := range e.dictionary {
-		words = append(words, w)
+	// Create a copy of the dictionary frequencies
+	dictFreqs := make(map[string]int64)
+	for w, info := range e.dictionary {
+		dictFreqs[w] = info.Frequency + info.UserFreq
 	}
+	// Get system dictionary words
+	sysDictWords := make([]string, 0, len(e.systemDict))
 	for w := range e.systemDict {
-		words = append(words, w)
+		sysDictWords = append(sysDictWords, w)
 	}
 	e.mu.Unlock()
 
-	log.Printf("[Engine] Training fuzzy model with %d words in background...", len(words))
+	log.Printf("[Engine] Training fuzzy model with %d dictionary words and %d system dictionary words in background...", len(dictFreqs), len(sysDictWords))
 	start := time.Now()
 	if e.fuzzyModel != nil {
-		e.fuzzyModel.Train(words)
+		// Set counts for words with real frequencies
+		for w, freq := range dictFreqs {
+			count := int(freq)
+			if count < 1 {
+				count = 1
+			}
+			e.fuzzyModel.SetCount(w, count, true)
+		}
+		// Set count = 1 for system dictionary words that do not have real frequencies
+		for _, w := range sysDictWords {
+			if _, exists := dictFreqs[w]; !exists {
+				e.fuzzyModel.SetCount(w, 1, true)
+			}
+		}
 	}
 	log.Printf("[Engine] Fuzzy model training complete (took %v)", time.Since(start))
 }
@@ -427,7 +450,8 @@ func (e *Engine) FuzzyCorrection(input string) (string, bool) {
 		return "", false
 	}
 
-	suggestions := e.fuzzyModel.Suggestions(input, true)
+	// SpellCheckSuggestions ranks candidates by their trained frequency counts
+	suggestions := e.fuzzyModel.SpellCheckSuggestions(input, 5)
 	if len(suggestions) > 0 {
 		return suggestions[0], true
 	}

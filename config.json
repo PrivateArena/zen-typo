@@ -12,7 +12,9 @@
   "enable_strip": false,
   "strip_select_modifier": "super",
   "enable_spellcheck_hotkey": true,
-  "spellcheck_trigger_key": "alt",
+  "spellcheck_trigger_key": "ctrl",
+  "enable_overlay_hotkey": false,
+  "overlay_trigger_key": "ctrl",
   "dict_path": "/usr/share/dict/words",
   "autocorrect_ignore_apps": [
     "terminal",

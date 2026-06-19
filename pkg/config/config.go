@@ -76,6 +76,12 @@ type Config struct {
 
 	// SpellcheckTriggerKey defines which modifier key triggers the spellcheck hotkey on double-press: "alt" | "shift" | "ctrl"
 	SpellcheckTriggerKey string `json:"spellcheck_trigger_key"`
+
+	// EnableOverlayHotkey enables the double-tap hotkey to open the autocomplete overlay.
+	EnableOverlayHotkey bool `json:"enable_overlay_hotkey"`
+
+	// OverlayTriggerKey defines which modifier key triggers the overlay on double-press: "ctrl" | "alt" | "shift"
+	OverlayTriggerKey string `json:"overlay_trigger_key"`
 }
 
 // Default returns a config with sensible out-of-the-box values.
@@ -99,6 +105,8 @@ func Default() *Config {
 		LazyOnnx:                  true,
 		EnableSpellcheckHotkey:    true,
 		SpellcheckTriggerKey:      "alt",
+		EnableOverlayHotkey:       true,
+		OverlayTriggerKey:         "ctrl",
 	}
 }
 

@@ -38,6 +38,16 @@ const (
 	kcShiftL    = 50
 	kcShiftR    = 62
 	kcSuper     = 133
+
+	// Navigation keys that reset fragment context
+	kcLeft     = 113
+	kcRight    = 114
+	kcUp       = 111
+	kcDown     = 116
+	kcHome     = 110
+	kcEnd      = 115
+	kcPageUp   = 112
+	kcPageDown = 117
 )
 
 // WordTracker maintains the current word fragment and a short word history
@@ -74,6 +84,17 @@ func NewWordTracker() *WordTracker {
 func (t *WordTracker) Feed(keycode int, isPress bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	// Mouse button clicks act as context boundaries to reset the typing state
+	if keycode == -1 {
+		t.fragment = ""
+		t.words = nil
+		if cb := t.OnBoundary; cb != nil {
+			go cb()
+		}
+		t.notify()
+		return
+	}
 
 	switch keycode {
 	case kcAltL, kcAltR:
@@ -121,8 +142,20 @@ func (t *WordTracker) Feed(keycode int, isPress bool) {
 	case kcShiftL, kcShiftR:
 		return // modifiers alone don't affect the fragment
 
+	case kcLeft, kcRight, kcUp, kcDown, kcHome, kcEnd, kcPageUp, kcPageDown:
+		t.fragment = ""
+		t.words = nil
+		if cb := t.OnBoundary; cb != nil {
+			go cb()
+		}
+		t.notify()
+
 	case kcBackspace:
-		if len(t.fragment) > 0 {
+		if t.ctrlPressed {
+			// Ctrl+Backspace deletes the entire current word fragment
+			t.fragment = ""
+			t.notify()
+		} else if len(t.fragment) > 0 {
 			runes := []rune(t.fragment)
 			t.fragment = string(runes[:len(runes)-1])
 			t.notify()
@@ -153,8 +186,15 @@ func (t *WordTracker) Feed(keycode int, isPress bool) {
 
 	default:
 		if ch, ok := keycodeToChar[keycode]; ok {
-			t.fragment += string(ch)
-			t.notify()
+			if t.ctrlPressed {
+				// Shortcut (e.g. Ctrl+C, Ctrl+A): reset the fragment
+				t.fragment = ""
+				t.words = nil
+				t.notify()
+			} else {
+				t.fragment += string(ch)
+				t.notify()
+			}
 		} else {
 			// Non-letter printable (digit, punctuation): treat as boundary
 			t.fragment = ""
